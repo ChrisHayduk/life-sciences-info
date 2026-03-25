@@ -17,6 +17,7 @@ def bootstrap(
     sync_limit: int | None,
     backfill_companies: int,
     max_filings_per_company: int | None,
+    years_back: int | None,
     ingest_news: bool,
     build_digest: bool,
     focus_tickers: list[str] | None,
@@ -35,7 +36,11 @@ def bootstrap(
         filing_service = FilingService(session)
         selected = companies[:backfill_companies]
         for index, company in enumerate(selected, start=1):
-            count = filing_service.backfill_company(company.id, max_filings=max_filings_per_company)
+            count = filing_service.backfill_company(
+                company.id,
+                max_filings=max_filings_per_company,
+                years_back=years_back,
+            )
             print(
                 f"[{index}/{len(selected)}] Backfilled {count} filings for {company.name} ({company.ticker or company.cik})",
                 flush=True,
@@ -67,6 +72,12 @@ def main() -> None:
         default=8,
         help="Cap the number of most recent target filings pulled per company during bootstrap.",
     )
+    parser.add_argument(
+        "--years-back",
+        type=int,
+        default=None,
+        help="Restrict filing backfill to the most recent N years, e.g. --years-back 3.",
+    )
     parser.add_argument("--skip-news", action="store_true", help="Skip RSS/news ingestion.")
     parser.add_argument("--skip-digest", action="store_true", help="Skip weekly digest generation.")
     parser.add_argument(
@@ -81,6 +92,7 @@ def main() -> None:
         sync_limit=args.sync_limit,
         backfill_companies=args.backfill_companies,
         max_filings_per_company=args.max_filings_per_company,
+        years_back=args.years_back,
         ingest_news=not args.skip_news,
         build_digest=not args.skip_digest,
         focus_tickers=focus_tickers or None,

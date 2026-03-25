@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 
+from sqlalchemy import select
+
 from app.db import SessionLocal, init_db
+from app.models import Company
 from app.models import Filing as FilingModel
 from app.models import NewsItem as NewsItemModel
 from app.services.digests import DigestService
@@ -24,8 +27,49 @@ def run_sync_universe(limit: int | None = None) -> int:
     return _with_session(lambda session: UniverseService(session).sync_universe(limit=limit))
 
 
-def run_backfill_company(company_id: int, max_filings: int | None = None) -> int:
-    return _with_session(lambda session: FilingService(session).backfill_company(company_id, max_filings=max_filings))
+def run_backfill_company(
+    company_id: int,
+    max_filings: int | None = None,
+    since_date=None,
+    years_back: int | None = None,
+) -> int:
+    return _with_session(
+        lambda session: FilingService(session).backfill_company(
+            company_id,
+            max_filings=max_filings,
+            since_date=since_date,
+            years_back=years_back,
+        )
+    )
+
+
+def run_backfill_top_companies(
+    *,
+    count: int,
+    max_filings: int | None = None,
+    since_date=None,
+    years_back: int | None = None,
+    focus_tickers: list[str] | None = None,
+) -> int:
+    def _run(session):
+        companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        if focus_tickers:
+            focus = {ticker.upper() for ticker in focus_tickers}
+            companies = [company for company in companies if (company.ticker or "").upper() in focus]
+        companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
+        selected = companies[:count]
+        filing_service = FilingService(session)
+        created = 0
+        for company in selected:
+            created += filing_service.backfill_company(
+                company.id,
+                max_filings=max_filings,
+                since_date=since_date,
+                years_back=years_back,
+            )
+        return created
+
+    return _with_session(_run)
 
 
 def run_poll_sec_filings() -> int:
@@ -95,6 +139,20 @@ def main() -> None:
     backfill_parser = subparsers.add_parser("backfill-company", help="Backfill filings for one company.")
     backfill_parser.add_argument("company_id", type=int)
     backfill_parser.add_argument("--max-filings", type=int, default=None)
+    backfill_parser.add_argument("--years-back", type=int, default=None)
+
+    backfill_top_parser = subparsers.add_parser(
+        "backfill-top-companies",
+        help="Backfill filings for the top covered companies by market cap.",
+    )
+    backfill_top_parser.add_argument("--count", type=int, default=25)
+    backfill_top_parser.add_argument("--max-filings", type=int, default=None)
+    backfill_top_parser.add_argument("--years-back", type=int, default=None)
+    backfill_top_parser.add_argument(
+        "--focus-tickers",
+        default="",
+        help="Comma-separated tickers to constrain the target set, e.g. PFE,MRK,AMGN",
+    )
 
     subparsers.add_parser("poll-sec-filings", help="Poll covered companies for newly filed periodic reports.")
     subparsers.add_parser("ingest-news", help="Pull configured news feeds and summarize new items.")
@@ -110,8 +168,22 @@ def main() -> None:
         print(f"Universe sync complete: {count} companies", flush=True)
         return
     if args.command == "backfill-company":
-        count = run_backfill_company(args.company_id, max_filings=args.max_filings)
+        count = run_backfill_company(
+            args.company_id,
+            max_filings=args.max_filings,
+            years_back=args.years_back,
+        )
         print(f"Backfilled {count} filings for company {args.company_id}", flush=True)
+        return
+    if args.command == "backfill-top-companies":
+        focus_tickers = [ticker.strip().upper() for ticker in args.focus_tickers.split(",") if ticker.strip()]
+        count = run_backfill_top_companies(
+            count=args.count,
+            max_filings=args.max_filings,
+            years_back=args.years_back,
+            focus_tickers=focus_tickers or None,
+        )
+        print(f"Backfilled {count} filings across the selected company set", flush=True)
         return
     if args.command == "poll-sec-filings":
         count = run_poll_sec_filings()

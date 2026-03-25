@@ -90,6 +90,20 @@ class FakeSECClient:
         return FilingDocument(content=html.encode("utf-8"), content_type="text/html", source_url="https://example.com")
 
 
+class FakeSECClientWithOlderFiling(FakeSECClient):
+    def iter_company_filings(self, cik: str):
+        return super().iter_company_filings(cik) + [
+            {
+                "accessionNumber": "0001-20-000001",
+                "form": "10-K",
+                "filingDate": "2020-02-01",
+                "reportDate": "2019-12-31",
+                "primaryDocument": "older.htm",
+                "primaryDocDescription": "Older annual report",
+            }
+        ]
+
+
 def test_form_normalization_and_6k_equivalence():
     assert normalize_form_type("10-Q/A") == "10-Q"
     assert is_periodic_6k("Interim results", "Quarterly results and six months ended 2024") is True
@@ -121,3 +135,22 @@ def test_backfill_loads_target_forms_and_dedupes_on_rerun(db_session, company, t
     pdf_bytes = ObjectStore().get_bytes(filings[0].pdf_artifact_key)
     assert pdf_bytes.startswith(b"%PDF")
 
+
+def test_backfill_company_can_limit_by_years_back(db_session, company, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    service = FilingService(
+        db_session,
+        sec_client=FakeSECClientWithOlderFiling(),
+        summarizer=StubSummarizer(),
+        market_data_client=StubMarketData(),
+        object_store=ObjectStore(),
+    )
+
+    created = service.backfill_company(company.id, years_back=3)
+    filings = db_session.query(Filing).all()
+
+    assert created == 3
+    assert all(filing.filed_at.year >= 2023 for filing in filings)

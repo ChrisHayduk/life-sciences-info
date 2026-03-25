@@ -111,8 +111,13 @@ def admin_sync_universe(limit: int | None = None, session: Session = Depends(get
 
 
 @router.post("/admin/backfill-company/{company_id}", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
-def admin_backfill_company(company_id: int, max_filings: int | None = None, session: Session = Depends(get_session)) -> AdminActionResponse:
-    count = FilingService(session).backfill_company(company_id, max_filings=max_filings)
+def admin_backfill_company(
+    company_id: int,
+    max_filings: int | None = None,
+    years_back: int | None = None,
+    session: Session = Depends(get_session),
+) -> AdminActionResponse:
+    count = FilingService(session).backfill_company(company_id, max_filings=max_filings, years_back=years_back)
     return AdminActionResponse(status="ok", message=f"Backfilled {count} filings for company {company_id}.")
 
 

@@ -7,6 +7,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -97,14 +98,28 @@ class FilingService:
         self.object_store = object_store or ObjectStore()
         self.settings = get_settings()
 
-    def backfill_company(self, company_id: int, max_filings: int | None = None) -> int:
+    def backfill_company(
+        self,
+        company_id: int,
+        max_filings: int | None = None,
+        since_date: date | None = None,
+        years_back: int | None = None,
+    ) -> int:
         company = self.session.get(Company, company_id)
         if not company:
             raise ValueError(f"Unknown company id={company_id}")
 
         filings = self.sec_client.iter_company_filings(company.cik)
         created = 0
+        cutoff_date = since_date or self._cutoff_date(years_back)
         target_rows = sorted(filings, key=lambda item: item.get("filingDate") or "", reverse=True)
+        if cutoff_date:
+            filtered_rows = []
+            for filing_row in target_rows:
+                filing_date = self._parse_date(filing_row.get("filingDate"))
+                if filing_date and filing_date >= cutoff_date:
+                    filtered_rows.append(filing_row)
+            target_rows = filtered_rows
         if max_filings is not None:
             target_rows = target_rows[:max_filings]
         for filing_row in target_rows:
@@ -268,6 +283,12 @@ class FilingService:
         if not raw_value:
             return None
         return date_parser.parse(raw_value).date()
+
+    @staticmethod
+    def _cutoff_date(years_back: int | None) -> date | None:
+        if not years_back:
+            return None
+        return (datetime.utcnow() - relativedelta(years=years_back)).date()
 
     def list_filings(self, limit: int = 50, company_id: int | None = None) -> list[FilingListItem]:
         query = select(Filing, Company).join(Company, Filing.company_id == Company.id).order_by(Filing.composite_score.desc())

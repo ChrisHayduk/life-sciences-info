@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+backend/.coverage
+backend/htmlcov/
+backend/data/
+web/.next/
+web/node_modules/
+web/.turbo/
+

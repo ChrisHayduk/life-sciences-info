@@ -1,0 +1,20 @@
+Metadata-Version: 2.4
+Name: life-sciences-intel-backend
+Version: 0.1.0
+Summary: Life sciences filings and news intelligence platform
+Requires-Python: >=3.12
+Requires-Dist: apscheduler>=3.10.4
+Requires-Dist: beautifulsoup4>=4.12.3
+Requires-Dist: boto3>=1.37.0
+Requires-Dist: dramatiq[redis]>=1.17.1
+Requires-Dist: feedparser>=6.0.11
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: httpx>=0.28.1
+Requires-Dist: pydantic-settings>=2.7.1
+Requires-Dist: python-dateutil>=2.9.0.post0
+Requires-Dist: psycopg[binary]>=3.2.6
+Requires-Dist: redis>=5.2.1
+Requires-Dist: sqlalchemy>=2.0.39
+Requires-Dist: uvicorn[standard]>=0.34.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.3.4; extra == "dev"

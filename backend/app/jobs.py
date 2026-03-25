@@ -139,6 +139,85 @@ def run_resummarize_item(kind: str, item_id: int) -> int:
     return _with_session(_run)
 
 
+def run_reprocess_filing(item_id: int) -> int:
+    def _run(session):
+        FilingService(session).reprocess_existing_filing(item_id)
+        return item_id
+
+    return _with_session(_run)
+
+
+def run_reprocess_company_filings(company_id: int, limit: int | None = None) -> int:
+    return _with_session(lambda session: FilingService(session).reprocess_company_filings(company_id, limit=limit))
+
+
+def run_refresh_all_data(
+    *,
+    sync_limit: int | None = None,
+    progress_every: int = 100,
+    company_count: int | None = None,
+    max_filings: int | None = None,
+    years_back: int | None = None,
+    focus_tickers: list[str] | None = None,
+    include_news: bool = True,
+    build_digest: bool = True,
+) -> dict[str, int]:
+    def _run(session):
+        universe_service = UniverseService(session, only_tickers=focus_tickers)
+        synced = universe_service.sync_universe(
+            limit=sync_limit,
+            progress_callback=lambda message: print(message, flush=True),
+            progress_every=progress_every,
+        )
+
+        companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        if focus_tickers:
+            focus = {ticker.upper() for ticker in focus_tickers}
+            companies = [company for company in companies if (company.ticker or "").upper() in focus]
+        companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
+        selected = companies[:company_count] if company_count else companies
+
+        filing_service = FilingService(session)
+        reprocessed_total = 0
+        backfilled_total = 0
+        for index, company in enumerate(selected, start=1):
+            reprocessed = filing_service.reprocess_company_filings(company.id)
+            added = filing_service.backfill_company(
+                company.id,
+                max_filings=max_filings,
+                years_back=years_back,
+            )
+            reprocessed_total += reprocessed
+            backfilled_total += added
+            print(
+                f"[{index}/{len(selected)}] Refreshed {company.name} ({company.ticker or company.cik}): "
+                f"{reprocessed} rebuilt, {added} added",
+                flush=True,
+            )
+
+        news_count = 0
+        if include_news:
+            news_count = NewsService(session).ingest_feeds()
+            print(f"News ingestion complete: {news_count} items", flush=True)
+
+        digest_count = 0
+        if build_digest:
+            digest = DigestService(session).build_weekly_digest()
+            digest_count = 1 if digest else 0
+            print(f"Weekly digest ready: {digest.id} {digest.title}", flush=True)
+
+        return {
+            "companies": len(selected),
+            "synced_companies": synced,
+            "reprocessed_filings": reprocessed_total,
+            "new_filings": backfilled_total,
+            "news_items": news_count,
+            "digests": digest_count,
+        }
+
+    return _with_session(_run)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run one-off platform jobs for deployment or maintenance.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -172,6 +251,33 @@ def main() -> None:
     resummarize_parser = subparsers.add_parser("resummarize", help="Re-summarize a filing or news item.")
     resummarize_parser.add_argument("kind", choices=["filing", "news"])
     resummarize_parser.add_argument("item_id", type=int)
+
+    reprocess_filing_parser = subparsers.add_parser("reprocess-filing", help="Re-download and rebuild one filing.")
+    reprocess_filing_parser.add_argument("item_id", type=int)
+
+    reprocess_company_parser = subparsers.add_parser(
+        "reprocess-company-filings",
+        help="Re-download and rebuild stored filings for one company.",
+    )
+    reprocess_company_parser.add_argument("company_id", type=int)
+    reprocess_company_parser.add_argument("--limit", type=int, default=None)
+
+    refresh_all_parser = subparsers.add_parser(
+        "refresh-all-data",
+        help="Resync companies, rebuild stored filings, backfill missing filings, and optionally refresh news/digests.",
+    )
+    refresh_all_parser.add_argument("--sync-limit", type=int, default=None)
+    refresh_all_parser.add_argument("--progress-every", type=int, default=100)
+    refresh_all_parser.add_argument("--company-count", type=int, default=None)
+    refresh_all_parser.add_argument("--max-filings", type=int, default=None)
+    refresh_all_parser.add_argument("--years-back", type=int, default=None)
+    refresh_all_parser.add_argument(
+        "--focus-tickers",
+        default="",
+        help="Comma-separated tickers to constrain the refresh set, e.g. MRK,PFE,AMGN",
+    )
+    refresh_all_parser.add_argument("--skip-news", action="store_true")
+    refresh_all_parser.add_argument("--skip-digest", action="store_true")
 
     args = parser.parse_args()
     if args.command == "sync-universe":
@@ -211,6 +317,35 @@ def main() -> None:
     if args.command == "build-weekly-digest":
         digest_id = run_build_weekly_digest()
         print(f"Built digest {digest_id}", flush=True)
+        return
+    if args.command == "reprocess-filing":
+        item_id = run_reprocess_filing(args.item_id)
+        print(f"Reprocessed filing {item_id}", flush=True)
+        return
+    if args.command == "reprocess-company-filings":
+        count = run_reprocess_company_filings(args.company_id, limit=args.limit)
+        print(f"Reprocessed {count} filings for company {args.company_id}", flush=True)
+        return
+    if args.command == "refresh-all-data":
+        focus_tickers = [ticker.strip().upper() for ticker in args.focus_tickers.split(",") if ticker.strip()]
+        result = run_refresh_all_data(
+            sync_limit=args.sync_limit,
+            progress_every=args.progress_every,
+            company_count=args.company_count,
+            max_filings=args.max_filings,
+            years_back=args.years_back,
+            focus_tickers=focus_tickers or None,
+            include_news=not args.skip_news,
+            build_digest=not args.skip_digest,
+        )
+        print(
+            "Refresh complete: "
+            f"{result['companies']} companies, "
+            f"{result['reprocessed_filings']} rebuilt filings, "
+            f"{result['new_filings']} new filings, "
+            f"{result['news_items']} news items",
+            flush=True,
+        )
         return
     item_id = run_resummarize_item(args.kind, args.item_id)
     print(f"Re-summarized {args.kind} {item_id}", flush=True)

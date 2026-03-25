@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     cors_origins: Annotated[List[str], NoDecode] = Field(default_factory=lambda: ["http://localhost:3000"])
     admin_api_token: str | None = None
     enable_scheduler: bool = False
+    enable_browser_pdf_rendering: bool = True
+    browser_pdf_timeout_seconds: float = 45.0
     timezone: str = "America/New_York"
     digest_weekday: str = "mon"
     digest_hour: int = 8

@@ -129,6 +129,13 @@ class NewsService:
         rows = self.session.scalars(select(NewsItem).order_by(NewsItem.composite_score.desc()).limit(limit)).all()
         return [self._to_response(item) for item in rows]
 
+    def list_news_for_company(self, company: Company, limit: int = 20) -> list[NewsItemResponse]:
+        matches = self._news_items_for_company(company)
+        return [self._to_response(item) for item in matches[:limit]]
+
+    def count_news_for_company(self, company: Company) -> int:
+        return len(self._news_items_for_company(company))
+
     def _to_response(self, item: NewsItem) -> NewsItemResponse:
         summary = item.summary_json or {}
         return NewsItemResponse(
@@ -203,3 +210,11 @@ class NewsService:
             if match not in seen:
                 seen.append(match)
         return seen[:10]
+
+    def _news_items_for_company(self, company: Company) -> list[NewsItem]:
+        aliases = {company.name}
+        if company.ticker:
+            aliases.add(company.ticker)
+
+        rows = self.session.scalars(select(NewsItem).order_by(NewsItem.composite_score.desc())).all()
+        return [item for item in rows if aliases.intersection(set(item.mentioned_companies or []))]

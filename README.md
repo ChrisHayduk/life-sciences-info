@@ -88,6 +88,7 @@ npm run dev
 - `ingest_news` pulls RSS/news sources and summarizes new stories
 - `build_weekly_digest` creates the Monday 8:00 AM ET digest
 - `python -m app.jobs ...` runs these tasks directly for deployment or maintenance
+- `python -m app.jobs refresh-all-data ...` resyncs companies, refreshes stored filings in place, and backfills anything missing
 
 ## Minimal Local Configuration
 
@@ -113,3 +114,4 @@ ADMIN_API_TOKEN=
 - `OBJECT_STORE_REGION=auto` is the right default for Cloudflare R2.
 - `CORS_ORIGINS` accepts a comma-separated list for split frontend/API deployments.
 - `ADMIN_API_TOKEN` protects the `/admin/*` routes when set.
+- `ENABLE_BROWSER_PDF_RENDERING=true` lets the backend use Playwright + Chromium to render SEC HTML filings directly to PDF. If browser rendering is unavailable, the app falls back to the internal text-based PDF generator.

@@ -58,6 +58,8 @@ Set these required environment variables during Blueprint creation:
 Notes:
 
 - `ENABLE_SCHEDULER` is already set to `true` in the Blueprint.
+- `ENABLE_BROWSER_PDF_RENDERING` is already set to `true` in the Blueprint.
+- The backend build now installs Chromium so HTML SEC filings can be rendered directly to PDF instead of going through the text fallback path.
 - Keep the Render API service at a single instance so scheduled jobs do not run more than once.
 - The backend health check path is `/health`.
 
@@ -129,6 +131,24 @@ Manual maintenance commands are available in [backend/app/jobs.py](/Users/christ
 - `python -m app.jobs build-weekly-digest`
 - `python -m app.jobs backfill-company <company_id> --max-filings 8`
 - `python -m app.jobs resummarize filing <item_id>`
+- `python -m app.jobs reprocess-filing <item_id>`
+- `python -m app.jobs reprocess-company-filings <company_id> --limit 25`
+- `python -m app.jobs refresh-all-data --sync-limit 5000 --company-count 250 --years-back 3`
+
+If you need to overwrite older bad PDFs, parsed sections, and stale market caps in place, use:
+
+```bash
+cd /opt/render/project/src/backend
+python -m app.jobs refresh-all-data --sync-limit 5000 --company-count 250 --years-back 3 --skip-news --skip-digest
+```
+
+Then optionally refresh news and rebuild the digest:
+
+```bash
+cd /opt/render/project/src/backend
+python -m app.jobs ingest-news
+python -m app.jobs build-weekly-digest
+```
 
 ## What You Do Not Need For This Deployment
 

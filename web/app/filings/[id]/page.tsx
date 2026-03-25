@@ -18,7 +18,9 @@ export default async function FilingDetailPage({ params }: { params: Promise<{ i
         <span className="eyebrow">{filing.form_type}</span>
         <h1>{filing.title ?? `${filing.company_name} ${filing.form_type}`}</h1>
         <p>
-          {filing.company_name}
+          <Link href={`/companies/${filing.company_id}`} className="inline-link">
+            {filing.company_name}
+          </Link>
           {filing.ticker ? ` (${filing.ticker})` : ""} filed this report on {formatDate(filing.filed_at)}.
         </p>
         <div className="metric-strip">

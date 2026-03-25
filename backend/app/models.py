@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, JSON, Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base, utcnow
@@ -24,7 +24,7 @@ class Company(Base, TimestampMixin):
     sic: Mapped[str | None] = mapped_column(String(8), index=True)
     sic_description: Mapped[str | None] = mapped_column(String(255))
     universe_reason: Mapped[str] = mapped_column(String(255), default="sic-allowlist")
-    market_cap: Mapped[int | None] = mapped_column(Integer)
+    market_cap: Mapped[int | None] = mapped_column(BigInteger)
     market_cap_currency: Mapped[str] = mapped_column(String(8), default="USD")
     market_cap_source: Mapped[str | None] = mapped_column(String(64))
     market_cap_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

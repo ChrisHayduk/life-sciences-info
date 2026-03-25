@@ -11,15 +11,33 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_session
 from app.models import Company, Digest, Filing, NewsItem
-from app.schemas import AdminActionResponse, CompanyResponse, DashboardResponse
+from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
 from app.jobs import run_resummarize_item
 from app.services.digests import DigestService
 from app.services.filings import FilingService
 from app.services.news import NewsService
 from app.services.storage import ObjectStore
-from app.services.universe import UniverseService
+from app.services.universe import UniverseService, describe_universe_reason
 
 router = APIRouter()
+
+
+def build_company_response(company: Company) -> CompanyResponse:
+    return CompanyResponse(
+        id=company.id,
+        cik=company.cik,
+        ticker=company.ticker,
+        name=company.name,
+        exchange=company.exchange,
+        sic=company.sic,
+        sic_description=company.sic_description,
+        market_cap=company.market_cap,
+        market_cap_currency=company.market_cap_currency,
+        market_cap_source=company.market_cap_source,
+        universe_reason=company.universe_reason,
+        universe_reason_label=describe_universe_reason(company.universe_reason),
+        is_active=company.is_active,
+    )
 
 
 def require_admin_token(
@@ -60,7 +78,32 @@ def get_dashboard(session: Session = Depends(get_session)) -> DashboardResponse:
 def list_companies(session: Session = Depends(get_session)) -> list[CompanyResponse]:
     companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
     companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
-    return [CompanyResponse.model_validate(company, from_attributes=True) for company in companies]
+    return [build_company_response(company) for company in companies]
+
+
+@router.get("/companies/{company_id}", response_model=CompanyDetailResponse)
+def company_detail(company_id: int, session: Session = Depends(get_session)) -> CompanyDetailResponse:
+    company = session.get(Company, company_id)
+    if not company or not company.is_active:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    filing_service = FilingService(session)
+    news_service = NewsService(session)
+    recent_filings = filing_service.list_filings(limit=20, company_id=company.id)
+    recent_news = news_service.list_news_for_company(company, limit=20)
+    base = build_company_response(company)
+
+    filings_count = session.scalar(select(func.count()).select_from(Filing).where(Filing.company_id == company.id)) or 0
+    news_count = news_service.count_news_for_company(company)
+
+    return CompanyDetailResponse(
+        **base.model_dump(),
+        market_cap_updated_at=company.market_cap_updated_at,
+        filings_count=filings_count,
+        news_count=news_count,
+        recent_filings=recent_filings,
+        recent_news=recent_news,
+    )
 
 
 @router.get("/filings")

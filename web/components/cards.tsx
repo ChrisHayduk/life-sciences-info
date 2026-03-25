@@ -52,7 +52,9 @@ export function FilingCard({ filing }: { filing: FilingListItem }) {
       </div>
       <h3>{filing.title ?? `${filing.company_name} ${filing.form_type}`}</h3>
       <p className="muted">
-        {filing.company_name}
+        <Link href={`/companies/${filing.company_id}`} className="inline-link">
+          {filing.company_name}
+        </Link>
         {filing.ticker ? ` (${filing.ticker})` : ""}
       </p>
       <p>{filing.summary || "Summary pending."}</p>
@@ -111,4 +113,3 @@ export function EmptyPanel({ title, body }: { title: string; body: string }) {
     </div>
   );
 }
-

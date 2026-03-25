@@ -2,7 +2,7 @@ from collections.abc import Generator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -50,3 +50,22 @@ def init_db() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_compatible_schema()
+
+
+def _ensure_compatible_schema() -> None:
+    inspector = inspect(engine)
+    if not inspector.has_table("companies"):
+        return
+
+    market_cap_column = next((column for column in inspector.get_columns("companies") if column["name"] == "market_cap"), None)
+    if market_cap_column is None:
+        return
+
+    type_name = market_cap_column["type"].__class__.__name__.upper()
+    if type_name in {"BIGINTEGER", "BIGINT"}:
+        return
+
+    if engine.dialect.name == "postgresql":
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE companies ALTER COLUMN market_cap TYPE BIGINT"))

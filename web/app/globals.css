@@ -35,6 +35,17 @@ a {
   text-decoration: none;
 }
 
+.inline-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.16em;
+}
+
+.inline-link:hover {
+  color: color-mix(in srgb, var(--accent) 78%, black);
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);

@@ -47,7 +47,16 @@ export type Company = {
   market_cap_currency: string;
   market_cap_source?: string | null;
   universe_reason: string;
+  universe_reason_label: string;
   is_active: boolean;
+};
+
+export type CompanyDetail = Company & {
+  market_cap_updated_at?: string | null;
+  filings_count: number;
+  news_count: number;
+  recent_filings: FilingListItem[];
+  recent_news: NewsItem[];
 };
 
 export type NewsItem = {
@@ -101,6 +110,7 @@ async function fetchJSON<T>(path: string): Promise<T> {
 export const api = {
   dashboard: () => fetchJSON<DashboardData>("/dashboard"),
   companies: () => fetchJSON<Company[]>("/companies"),
+  company: (id: string) => fetchJSON<CompanyDetail>(`/companies/${id}`),
   filings: () => fetchJSON<FilingListItem[]>("/filings"),
   filing: (id: string) => fetchJSON<FilingDetail>(`/filings/${id}`),
   news: () => fetchJSON<NewsItem[]>("/news"),
@@ -119,10 +129,16 @@ export function formatCurrency(value?: number | null): string {
   }).format(value);
 }
 
+export function formatMarketCap(company: Pick<Company, "market_cap" | "ticker">): string {
+  if (company.market_cap) {
+    return formatCurrency(company.market_cap);
+  }
+  return company.ticker ? "Pending refresh" : "Unavailable";
+}
+
 export function formatDate(value: string): string {
   return new Date(value).toLocaleString("en-US", {
     dateStyle: "medium",
     timeStyle: "short"
   });
 }
-

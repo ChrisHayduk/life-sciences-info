@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.models import Filing
 from app.schemas import SummaryPayload
-from app.services.filings import FilingService, is_periodic_6k, normalize_form_type
+from app.services.filings import FilingService, html_to_text, is_periodic_6k, normalize_form_type, parse_sections
 from app.services.sec import FilingDocument
 from app.services.storage import ObjectStore
 
@@ -79,12 +79,29 @@ class FakeSECClient:
     def download_primary_document(self, cik: str, accession_number: str, primary_document: str | None):
         html = f"""
         <html><body>
-        <h1>Business</h1>
+        <div style="display:none">mrk:NoiseMember 2024-12-31 0000310158 us-gaap:PendingLitigationMember</div>
+        <div>Item 1.</div>
+        <div>Business</div>
+        <div>1</div>
+        <div>Item 1A.</div>
+        <div>Risk Factors</div>
+        <div>26</div>
+        <div>Item 7.</div>
+        <div>Management's Discussion and Analysis of Financial Condition and Results of Operations</div>
+        <div>46</div>
+        <h1>Item 1.</h1>
+        <h2>Business</h2>
         <p>Revenue increased 22% to $120 million.</p>
+        <h1>Item 1A.</h1>
         <h2>Risk Factors</h2>
         <p>Manufacturing delay and FDA review noted.</p>
-        <h2>Management's Discussion</h2>
+        <h1>Item 7.</h1>
+        <h2>Management's Discussion and Analysis of Financial Condition and Results of Operations</h2>
+        <h3>Analysis of Liquidity and Capital Resources</h3>
         <p>Guidance increased after strong quarterly results.</p>
+        <h1>Item 8.</h1>
+        <h2>Financial Statements and Supplementary Data</h2>
+        <p>Consolidated statements follow.</p>
         </body></html>
         """
         return FilingDocument(content=html.encode("utf-8"), content_type="text/html", source_url="https://example.com")
@@ -108,6 +125,53 @@ def test_form_normalization_and_6k_equivalence():
     assert normalize_form_type("10-Q/A") == "10-Q"
     assert is_periodic_6k("Interim results", "Quarterly results and six months ended 2024") is True
     assert is_periodic_6k("Other announcement", "Executive appointment") is False
+
+
+def test_html_to_text_strips_xbrl_noise_and_parse_sections_prefers_body_over_toc():
+    html = """
+    <html>
+      <body>
+        <div style="display:none">mrk:NoiseMember 2024-12-31 0000310158 us-gaap:PendingLitigationMember</div>
+        <div>Item 1.</div>
+        <div>Business</div>
+        <div>1</div>
+        <div>Item 1A.</div>
+        <div>Risk Factors</div>
+        <div>26</div>
+        <div>Item 7.</div>
+        <div>Management's Discussion and Analysis of Financial Condition and Results of Operations</div>
+        <div>46</div>
+        <h1>Item 1.</h1>
+        <h2>Business</h2>
+        <p>The company develops oncology and vaccine products.</p>
+        <h1>Item 1A.</h1>
+        <h2>Risk Factors</h2>
+        <p>Loss of exclusivity may reduce revenue.</p>
+        <h1>Item 3.</h1>
+        <h2>Legal Proceedings</h2>
+        <p>Patent litigation remains pending.</p>
+        <h1>Item 7.</h1>
+        <h2>Management's Discussion and Analysis of Financial Condition and Results of Operations</h2>
+        <h3>Analysis of Liquidity and Capital Resources</h3>
+        <p>Operating cash flow improved meaningfully in 2024.</p>
+        <h1>Item 8.</h1>
+        <h2>Financial Statements and Supplementary Data</h2>
+        <p>Consolidated statements follow.</p>
+      </body>
+    </html>
+    """
+
+    text = html_to_text(html.encode("utf-8"), "text/html")
+    sections = parse_sections(text, form_type="10-K")
+
+    assert "mrk:NoiseMember" not in text
+    assert "us-gaap:PendingLitigationMember" not in text
+    assert sections["business"].startswith("The company develops oncology and vaccine products.")
+    assert "Item 1A." not in sections["business"]
+    assert sections["risk_factors"].startswith("Loss of exclusivity may reduce revenue.")
+    assert sections["legal_proceedings"].startswith("Patent litigation remains pending.")
+    assert sections["liquidity"].startswith("Operating cash flow improved meaningfully in 2024.")
+    assert sections["financial_statements"].startswith("Consolidated statements follow.")
 
 
 def test_backfill_loads_target_forms_and_dedupes_on_rerun(db_session, company, tmp_path, monkeypatch):
@@ -134,6 +198,34 @@ def test_backfill_loads_target_forms_and_dedupes_on_rerun(db_session, company, t
     assert all(filing.pdf_artifact_key for filing in filings)
     pdf_bytes = ObjectStore().get_bytes(filings[0].pdf_artifact_key)
     assert pdf_bytes.startswith(b"%PDF")
+    assert b"Risk Factors" in pdf_bytes
+    assert b"mrk:NoiseMember" not in pdf_bytes
+
+
+def test_backfill_prefers_browser_rendered_html_pdf_when_available(db_session, company, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "app.services.filings.render_html_to_pdf",
+        lambda html_bytes, source_url=None, timeout_seconds=45.0: b"%PDF-browser-rendered",
+    )
+    service = FilingService(
+        db_session,
+        sec_client=FakeSECClient(),
+        summarizer=StubSummarizer(),
+        market_data_client=StubMarketData(),
+        object_store=ObjectStore(),
+    )
+
+    created = service.backfill_company(company.id)
+    filing = db_session.query(Filing).filter(Filing.normalized_form_type == "10-K").one()
+    pdf_bytes = ObjectStore().get_bytes(filing.pdf_artifact_key)
+
+    assert created == 3
+    assert pdf_bytes == b"%PDF-browser-rendered"
+    assert filing.extra_metadata["pdf_source"] == "rendered-html"
 
 
 def test_backfill_company_can_limit_by_years_back(db_session, company, tmp_path, monkeypatch):

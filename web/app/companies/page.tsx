@@ -1,5 +1,7 @@
+import Link from "next/link";
+
 import { EmptyPanel, SectionHeader } from "@/components/cards";
-import { api, formatCurrency } from "@/lib/api";
+import { api, formatMarketCap } from "@/lib/api";
 
 export default async function CompaniesPage() {
   const companies = await api.companies().catch(() => []);
@@ -37,7 +39,11 @@ export default async function CompaniesPage() {
                 {companies.map((company) => (
                   <tr key={company.id}>
                     <td>
-                      <strong>{company.name}</strong>
+                      <strong>
+                        <Link href={`/companies/${company.id}`} className="inline-link">
+                          {company.name}
+                        </Link>
+                      </strong>
                       <div className="muted">{company.exchange ?? "Exchange unavailable"}</div>
                     </td>
                     <td>{company.ticker ?? "N/A"}</td>
@@ -45,8 +51,8 @@ export default async function CompaniesPage() {
                       {company.sic ?? "N/A"}
                       <div className="muted">{company.sic_description ?? ""}</div>
                     </td>
-                    <td>{formatCurrency(company.market_cap)}</td>
-                    <td>{company.universe_reason}</td>
+                    <td>{formatMarketCap(company)}</td>
+                    <td>{company.universe_reason_label}</td>
                   </tr>
                 ))}
               </tbody>
@@ -62,4 +68,3 @@ export default async function CompaniesPage() {
     </>
   );
 }
-

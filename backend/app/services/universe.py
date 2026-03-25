@@ -26,6 +26,14 @@ def is_core_life_sciences(sic: str | None, *, allowlisted: bool = False, denylis
     return str(sic) in CORE_LIFE_SCIENCES_SIC
 
 
+def describe_universe_reason(reason: str) -> str:
+    labels = {
+        "sic-allowlist": "Core life sciences SIC filter",
+        "manual-allowlist": "Manual include override",
+    }
+    return labels.get(reason, reason.replace("-", " ").title())
+
+
 class UniverseService:
     def __init__(
         self,

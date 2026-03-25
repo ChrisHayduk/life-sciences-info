@@ -5,7 +5,7 @@ services:
     rootDir: backend
     plan: starter
     autoDeploy: true
-    buildCommand: pip install -e .
+    buildCommand: pip install -e . && python -m playwright install chromium
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
@@ -20,6 +20,8 @@ services:
       - key: OBJECT_STORE_REGION
         value: auto
       - key: ENABLE_SCHEDULER
+        value: "true"
+      - key: ENABLE_BROWSER_PDF_RENDERING
         value: "true"
       - key: SEC_USER_AGENT
         sync: false

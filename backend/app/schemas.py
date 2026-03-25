@@ -29,8 +29,6 @@ class SummaryPayload(BaseModel):
 
 
 class CompanyResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     cik: str
     ticker: str | None
@@ -42,6 +40,7 @@ class CompanyResponse(BaseModel):
     market_cap_currency: str
     market_cap_source: str | None
     universe_reason: str
+    universe_reason_label: str
     is_active: bool
 
 
@@ -93,6 +92,14 @@ class NewsItemResponse(BaseModel):
     key_takeaways: list[str] = Field(default_factory=list)
 
 
+class CompanyDetailResponse(CompanyResponse):
+    market_cap_updated_at: datetime | None = None
+    filings_count: int = 0
+    news_count: int = 0
+    recent_filings: list[FilingListItem] = Field(default_factory=list)
+    recent_news: list[NewsItemResponse] = Field(default_factory=list)
+
+
 class DigestResponse(BaseModel):
     id: int
     digest_type: str
@@ -114,4 +121,3 @@ class DashboardResponse(BaseModel):
 class AdminActionResponse(BaseModel):
     status: str
     message: str
-

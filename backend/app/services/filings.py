@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -288,7 +288,7 @@ class FilingService:
     def _cutoff_date(years_back: int | None) -> date | None:
         if not years_back:
             return None
-        return (datetime.utcnow() - relativedelta(years=years_back)).date()
+        return (datetime.now(UTC) - relativedelta(years=years_back)).date()
 
     def list_filings(self, limit: int = 50, company_id: int | None = None) -> list[FilingListItem]:
         query = select(Filing, Company).join(Company, Filing.company_id == Company.id).order_by(Filing.composite_score.desc())

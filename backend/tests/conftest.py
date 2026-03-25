@@ -18,6 +18,11 @@ def db_session(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setenv("OPENAI_API_KEY", "")
     monkeypatch.setenv("ALPHA_VANTAGE_API_KEY", "")
+    monkeypatch.setenv("OBJECT_STORE_ENDPOINT_URL", "")
+    monkeypatch.setenv("OBJECT_STORE_ACCESS_KEY_ID", "")
+    monkeypatch.setenv("OBJECT_STORE_SECRET_ACCESS_KEY", "")
+    monkeypatch.setenv("OBJECT_STORE_REGION", "")
+    monkeypatch.setenv("OBJECT_STORE_BUCKET", "test-artifacts")
     from app.config import get_settings
 
     get_settings.cache_clear()

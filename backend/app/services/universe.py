@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Iterable
 
 from sqlalchemy import select
@@ -42,12 +43,23 @@ class UniverseService:
         self.denylist = {value.upper() for value in (denylist or [])}
         self.only_tickers = {value.upper() for value in (only_tickers or [])}
 
-    def sync_universe(self, limit: int | None = None) -> int:
+    def sync_universe(
+        self,
+        limit: int | None = None,
+        progress_callback: Callable[[str], None] | None = None,
+        progress_every: int = 100,
+    ) -> int:
         count = 0
         ticker_rows = self.sec_client.get_company_tickers()
         if self.only_tickers:
             ticker_rows = [row for row in ticker_rows if ((row.get("ticker") or "").upper() in self.only_tickers)]
-        for row in ticker_rows[:limit]:
+        target_rows = ticker_rows[:limit]
+        total_rows = len(target_rows)
+
+        if progress_callback:
+            progress_callback(f"Universe sync starting: scanning {total_rows} SEC issuers")
+
+        for index, row in enumerate(target_rows, start=1):
             cik = normalize_cik(row.get("cik") or row.get("cik_str"))
             ticker = (row.get("ticker") or "").upper() or None
             allowlisted = cik in self.allowlist or (ticker or "") in self.allowlist
@@ -85,5 +97,12 @@ class UniverseService:
 
             count += 1
 
+            if progress_callback and (index == total_rows or index % progress_every == 0):
+                progress_callback(
+                    f"Universe sync progress: scanned {index}/{total_rows} issuers, matched {count} covered companies"
+                )
+
         self.session.commit()
+        if progress_callback:
+            progress_callback(f"Universe sync complete: matched {count} covered companies")
         return count

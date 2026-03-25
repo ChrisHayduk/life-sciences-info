@@ -15,6 +15,7 @@ from app.services.universe import UniverseService
 def bootstrap(
     *,
     sync_limit: int | None,
+    sync_progress_every: int,
     backfill_companies: int,
     max_filings_per_company: int | None,
     years_back: int | None,
@@ -25,7 +26,11 @@ def bootstrap(
     init_db()
     session = SessionLocal()
     try:
-        synced = UniverseService(session, only_tickers=focus_tickers).sync_universe(limit=sync_limit)
+        synced = UniverseService(session, only_tickers=focus_tickers).sync_universe(
+            limit=sync_limit,
+            progress_every=sync_progress_every,
+            progress_callback=lambda message: print(message, flush=True),
+        )
         print(f"Universe sync complete: {synced} companies", flush=True)
 
         companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
@@ -61,6 +66,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Bootstrap the life sciences intelligence platform locally.")
     parser.add_argument("--sync-limit", type=int, default=250, help="Limit SEC issuers scanned during universe sync.")
     parser.add_argument(
+        "--sync-progress-every",
+        type=int,
+        default=100,
+        help="Print sync progress every N scanned SEC issuers.",
+    )
+    parser.add_argument(
         "--backfill-companies",
         type=int,
         default=10,
@@ -90,6 +101,7 @@ def main() -> None:
 
     bootstrap(
         sync_limit=args.sync_limit,
+        sync_progress_every=args.sync_progress_every,
         backfill_companies=args.backfill_companies,
         max_filings_per_company=args.max_filings_per_company,
         years_back=args.years_back,

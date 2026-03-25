@@ -23,8 +23,18 @@ def _with_session(callback):
         session.close()
 
 
-def run_sync_universe(limit: int | None = None) -> int:
-    return _with_session(lambda session: UniverseService(session).sync_universe(limit=limit))
+def run_sync_universe(
+    limit: int | None = None,
+    progress_callback=None,
+    progress_every: int = 100,
+) -> int:
+    return _with_session(
+        lambda session: UniverseService(session).sync_universe(
+            limit=limit,
+            progress_callback=progress_callback,
+            progress_every=progress_every,
+        )
+    )
 
 
 def run_backfill_company(
@@ -135,6 +145,7 @@ def main() -> None:
 
     sync_universe_parser = subparsers.add_parser("sync-universe", help="Refresh the covered company universe.")
     sync_universe_parser.add_argument("--limit", type=int, default=None)
+    sync_universe_parser.add_argument("--progress-every", type=int, default=100)
 
     backfill_parser = subparsers.add_parser("backfill-company", help="Backfill filings for one company.")
     backfill_parser.add_argument("company_id", type=int)
@@ -164,7 +175,11 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "sync-universe":
-        count = run_sync_universe(limit=args.limit)
+        count = run_sync_universe(
+            limit=args.limit,
+            progress_every=args.progress_every,
+            progress_callback=lambda message: print(message, flush=True),
+        )
         print(f"Universe sync complete: {count} companies", flush=True)
         return
     if args.command == "backfill-company":

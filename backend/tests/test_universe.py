@@ -50,3 +50,20 @@ def test_sync_universe_filters_by_sic_and_honors_overrides(db_session):
     assert tickers == ["ABIO", "MANU"]
     assert companies[1].universe_reason == "manual-allowlist"
 
+
+def test_sync_universe_reports_progress_when_callback_is_provided(db_session):
+    messages = []
+    service = UniverseService(
+        db_session,
+        sec_client=FakeSECClient(),
+        market_data_client=FakeMarketDataClient(),
+        allowlist={"MANU"},
+        denylist={"TOOLS"},
+    )
+
+    count = service.sync_universe(progress_callback=messages.append, progress_every=1)
+
+    assert count == 2
+    assert messages[0] == "Universe sync starting: scanning 3 SEC issuers"
+    assert any("scanned 1/3 issuers" in message for message in messages)
+    assert messages[-1] == "Universe sync complete: matched 2 covered companies"

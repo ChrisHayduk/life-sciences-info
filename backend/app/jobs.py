@@ -162,7 +162,7 @@ def run_refresh_all_data(
     include_news: bool = True,
     build_digest: bool = True,
 ) -> dict[str, int]:
-    def _run(session):
+    def _sync_and_select(session):
         universe_service = UniverseService(session, only_tickers=focus_tickers)
         synced = universe_service.sync_universe(
             limit=sync_limit,
@@ -176,46 +176,60 @@ def run_refresh_all_data(
             companies = [company for company in companies if (company.ticker or "").upper() in focus]
         companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
         selected = companies[:company_count] if company_count else companies
+        selected_snapshot = [
+            {
+                "id": company.id,
+                "name": company.name,
+                "ticker": company.ticker,
+                "cik": company.cik,
+            }
+            for company in selected
+        ]
+        return synced, selected_snapshot
 
-        filing_service = FilingService(session)
-        reprocessed_total = 0
-        backfilled_total = 0
-        for index, company in enumerate(selected, start=1):
-            reprocessed = filing_service.reprocess_company_filings(company.id)
+    synced, selected = _with_session(_sync_and_select)
+
+    reprocessed_total = 0
+    backfilled_total = 0
+    for index, company in enumerate(selected, start=1):
+        def _refresh_company(session):
+            filing_service = FilingService(session)
+            reprocessed = filing_service.reprocess_company_filings(company["id"])
             added = filing_service.backfill_company(
-                company.id,
+                company["id"],
                 max_filings=max_filings,
                 years_back=years_back,
             )
-            reprocessed_total += reprocessed
-            backfilled_total += added
-            print(
-                f"[{index}/{len(selected)}] Refreshed {company.name} ({company.ticker or company.cik}): "
-                f"{reprocessed} rebuilt, {added} added",
-                flush=True,
-            )
+            return reprocessed, added
 
-        news_count = 0
-        if include_news:
-            news_count = NewsService(session).ingest_feeds()
-            print(f"News ingestion complete: {news_count} items", flush=True)
+        reprocessed, added = _with_session(_refresh_company)
+        reprocessed_total += reprocessed
+        backfilled_total += added
+        print(
+            f"[{index}/{len(selected)}] Refreshed {company['name']} ({company['ticker'] or company['cik']}): "
+            f"{reprocessed} rebuilt, {added} added",
+            flush=True,
+        )
 
-        digest_count = 0
-        if build_digest:
-            digest = DigestService(session).build_weekly_digest()
-            digest_count = 1 if digest else 0
-            print(f"Weekly digest ready: {digest.id} {digest.title}", flush=True)
+    news_count = 0
+    if include_news:
+        news_count = _with_session(lambda session: NewsService(session).ingest_feeds())
+        print(f"News ingestion complete: {news_count} items", flush=True)
 
-        return {
-            "companies": len(selected),
-            "synced_companies": synced,
-            "reprocessed_filings": reprocessed_total,
-            "new_filings": backfilled_total,
-            "news_items": news_count,
-            "digests": digest_count,
-        }
+    digest_count = 0
+    if build_digest:
+        digest = _with_session(lambda session: DigestService(session).build_weekly_digest())
+        digest_count = 1 if digest else 0
+        print(f"Weekly digest ready: {digest.id} {digest.title}", flush=True)
 
-    return _with_session(_run)
+    return {
+        "companies": len(selected),
+        "synced_companies": synced,
+        "reprocessed_filings": reprocessed_total,
+        "new_filings": backfilled_total,
+        "news_items": news_count,
+        "digests": digest_count,
+    }
 
 
 def main() -> None:

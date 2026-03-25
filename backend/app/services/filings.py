@@ -442,13 +442,13 @@ class FilingService:
         if not company:
             raise ValueError(f"Unknown company id={company_id}")
 
-        filings = self.session.scalars(
-            select(Filing).where(Filing.company_id == company_id).order_by(Filing.filed_at.desc())
+        filing_ids = self.session.scalars(
+            select(Filing.id).where(Filing.company_id == company_id).order_by(Filing.filed_at.desc())
         ).all()
         updated = 0
-        for filing in filings[: limit or None]:
-            updated += int(self.reprocess_existing_filing(filing.id, commit=False))
-        self.session.commit()
+        for filing_id in filing_ids[: limit or None]:
+            updated += int(self.reprocess_existing_filing(filing_id, commit=True))
+            self.session.expunge_all()
         return updated
 
     def reprocess_existing_filing(self, filing_id: int, *, commit: bool = True) -> bool:

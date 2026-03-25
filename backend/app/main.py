@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+from threading import Thread
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,18 +10,41 @@ from app.config import get_settings
 from app.db import init_db
 from app.scheduler import build_scheduler
 
+logger = logging.getLogger(__name__)
+
+
+def _initialize_runtime(app: FastAPI) -> None:
+    try:
+        logger.info("Starting background runtime initialization")
+        init_db()
+        app.state.db_ready = True
+        logger.info("Database initialization complete")
+
+        if settings.enable_scheduler:
+            scheduler = build_scheduler(background=True)
+            scheduler.start()
+            app.state.scheduler = scheduler
+            logger.info("Scheduler started")
+
+        app.state.runtime_ready = True
+    except Exception as exc:  # pragma: no cover - deployment/runtime behavior
+        app.state.startup_error = str(exc)
+        logger.exception("Background runtime initialization failed")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
-    scheduler = None
-    if settings.enable_scheduler:
-        scheduler = build_scheduler(background=True)
-        scheduler.start()
-        app.state.scheduler = scheduler
+    app.state.scheduler = None
+    app.state.db_ready = False
+    app.state.runtime_ready = False
+    app.state.startup_error = None
+
+    startup_thread = Thread(target=_initialize_runtime, args=(app,), daemon=True, name="runtime-initializer")
+    startup_thread.start()
     try:
         yield
     finally:
+        scheduler = getattr(app.state, "scheduler", None)
         if scheduler:
             scheduler.shutdown(wait=False)
 
@@ -37,5 +62,14 @@ app.include_router(router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
-def healthcheck() -> dict[str, str]:
-    return {"status": "ok"}
+def healthcheck() -> dict[str, str | bool | None]:
+    startup_error = getattr(app.state, "startup_error", None)
+    runtime_ready = getattr(app.state, "runtime_ready", False)
+    db_ready = getattr(app.state, "db_ready", False)
+    return {
+        "status": "ok" if not startup_error else "degraded",
+        "ready": runtime_ready,
+        "db_ready": db_ready,
+        "scheduler_enabled": settings.enable_scheduler,
+        "startup_error": startup_error,
+    }

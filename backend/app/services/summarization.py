@@ -10,6 +10,33 @@ from pydantic import ValidationError
 from app.config import get_settings
 from app.schemas import SummaryPayload
 
+# Lightweight schema for 8-K event filings (6 fields vs 14 in full schema)
+EIGHT_K_SUMMARY_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string"},
+        "event_type": {"type": "string"},
+        "key_takeaways": {"type": "array", "items": {"type": "string"}},
+        "risk_flags": {"type": "array", "items": {"type": "string"}},
+        "importance_score": {"type": "number"},
+        "entities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "name": {"type": "string"},
+                    "type": {"type": "string"},
+                    "context": {"type": "string"},
+                },
+                "required": ["name", "type", "context"],
+            },
+        },
+    },
+    "required": ["summary", "event_type", "key_takeaways", "risk_flags", "importance_score", "entities"],
+}
+
 ENTITY_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -197,8 +224,8 @@ class OpenAISummarizer:
                 "text": {
                     "format": {
                         "type": "json_schema",
-                        "name": "life_sciences_summary",
-                        "schema": SUMMARY_SCHEMA,
+                        "name": "life_sciences_8k_summary" if normalized_form == "8-K" else "life_sciences_summary",
+                        "schema": EIGHT_K_SUMMARY_SCHEMA if normalized_form == "8-K" else SUMMARY_SCHEMA,
                         "strict": True,
                     }
                 },
@@ -294,6 +321,96 @@ class OpenAISummarizer:
                 last_error = exc
 
         return {"status": "failed", "reason": str(last_error)}
+
+    def summarize_digest(
+        self,
+        *,
+        window_label: str,
+        filing_summaries: list[dict[str, str]],
+        news_summaries: list[dict[str, str]],
+        max_attempts: int = 2,
+    ) -> str:
+        """Generate an AI narrative for the weekly digest from pre-existing summaries.
+
+        Returns a multi-paragraph narrative string. Falls back to simple
+        concatenation if no API key is configured.
+        """
+        if not self.settings.openai_api_key:
+            return self._fallback_digest_narrative(filing_summaries, news_summaries)
+
+        # Build compact input from existing summaries (no raw text needed)
+        filing_block = "\n".join(
+            f"- [{f.get('form_type', 'Filing')}] {f.get('company', 'Unknown')}: {f.get('summary', '')}"
+            for f in filing_summaries[:10]
+        )
+        news_block = "\n".join(
+            f"- [{n.get('source', 'News')}] {n.get('title', '')}: {n.get('summary', '')}"
+            for n in news_summaries[:10]
+        )
+
+        digest_prompt = (
+            f"Digest window: {window_label}\n\n"
+            f"TOP FILINGS THIS WEEK:\n{filing_block or 'None'}\n\n"
+            f"TOP NEWS THIS WEEK:\n{news_block or 'None'}\n\n"
+            "Write a 3-5 paragraph weekly intelligence digest for a life sciences investor. "
+            "Synthesize themes across filings and news — do not list items one-by-one. "
+            "Highlight: (1) the most material regulatory or clinical events, "
+            "(2) notable risk changes across the portfolio, "
+            "(3) market-moving disclosures or guidance changes, "
+            "(4) any emerging patterns or sector trends. "
+            "Be concise, specific, and opinionated about what matters most."
+        )
+
+        last_error: Exception | None = None
+        for _ in range(max_attempts):
+            try:
+                response = self.http_client.post(
+                    f"{self.settings.openai_api_base}/responses",
+                    headers={
+                        "Authorization": f"Bearer {self.settings.openai_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.settings.openai_model,
+                        "input": [
+                            {"role": "system", "content": [{"type": "input_text", "text": (
+                                "You write weekly intelligence digests for life sciences investors. "
+                                "Your tone is direct, analytical, and concise. Use markdown formatting. "
+                                "Focus on what changed this week and why it matters for portfolio decisions."
+                            )}]},
+                            {"role": "user", "content": [{"type": "input_text", "text": digest_prompt}]},
+                        ],
+                    },
+                )
+                response.raise_for_status()
+                body = response.json()
+                # Extract plain text (not JSON schema)
+                text = body.get("output_text")
+                if text:
+                    return text
+                for output in body.get("output", []):
+                    for content in output.get("content", []):
+                        if content.get("text"):
+                            return content["text"]
+                raise ValueError("No text in response")
+            except (ValueError, httpx.HTTPError) as exc:
+                last_error = exc
+
+        # Fall back to simple narrative on failure
+        return self._fallback_digest_narrative(filing_summaries, news_summaries)
+
+    @staticmethod
+    def _fallback_digest_narrative(
+        filing_summaries: list[dict[str, str]],
+        news_summaries: list[dict[str, str]],
+    ) -> str:
+        bits = []
+        if filing_summaries:
+            bits.append(f"{len(filing_summaries)} notable filings were captured this week.")
+        if news_summaries:
+            top_title = news_summaries[0].get("title", "")
+            bits.append(f"{len(news_summaries)} important news items were tracked, led by {top_title}.")
+        return " ".join(bits) or "No qualifying filings or news were captured in this digest window."
 
     def _fallback_summary(
         self,

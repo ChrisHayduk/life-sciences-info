@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import Digest, Filing, NewsItem
 from app.schemas import DigestResponse
+from app.services.summarization import OpenAISummarizer
 
 
 def weekly_digest_window(reference: datetime | None = None, timezone_name: str = "America/New_York") -> tuple[datetime, datetime]:
@@ -50,12 +51,33 @@ class DigestService:
             .limit(10)
         ).all()
 
-        narrative_bits = []
-        if filings:
-            narrative_bits.append(f"{len(filings)} notable filings led the week, with the top item scoring {filings[0].composite_score:.1f}.")
-        if news_items:
-            narrative_bits.append(f"{len(news_items)} important news items were captured, led by {news_items[0].title}.")
-        narrative_summary = " ".join(narrative_bits) or "No qualifying filings or news were captured in this digest window."
+        # Build summaries for AI digest generation
+        filing_summaries = []
+        for f in filings:
+            summary = (f.summary_json or {}).get("summary", "")
+            company = self.session.get(Filing, f.id)  # Already have the filing
+            filing_summaries.append({
+                "form_type": f.form_type,
+                "company": f.title or "Unknown",
+                "summary": summary,
+                "score": f"{f.composite_score:.1f}",
+            })
+        news_summaries = []
+        for n in news_items:
+            summary = (n.summary_json or {}).get("summary", "")
+            news_summaries.append({
+                "source": n.source_name,
+                "title": n.title,
+                "summary": summary,
+            })
+
+        window_label = f"{window_start.date()} to {(window_end - timedelta(days=1)).date()}"
+        summarizer = OpenAISummarizer()
+        narrative_summary = summarizer.summarize_digest(
+            window_label=window_label,
+            filing_summaries=filing_summaries,
+            news_summaries=news_summaries,
+        )
 
         digest = Digest(
             digest_type="weekly",

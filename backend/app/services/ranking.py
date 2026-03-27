@@ -82,6 +82,48 @@ def quantitative_delta_score(current_text: str | None, prior_text: str | None) -
     return round(min(delta * 100.0, 100.0), 2)
 
 
+def summary_priority_score(
+    filing: Filing,
+    company_market_cap_score: float = 0.0,
+) -> float:
+    """Compute a priority score for deciding which pending filings to summarize first.
+
+    Weights are tuned to ensure material events (8-K with FDA approval) beat
+    routine quarterly updates even from larger companies.
+    """
+    form_base = FILING_FORM_BASE_SCORES.get(filing.normalized_form_type, 50.0)
+    text = (filing.raw_text or "")[:10000]
+    material = material_event_score(text)
+    recency = recency_score(filing.filed_at)
+
+    return round(
+        0.30 * form_base
+        + 0.30 * material
+        + 0.20 * company_market_cap_score
+        + 0.20 * recency,
+        2,
+    )
+
+
+def news_summary_priority_score(
+    news_item: NewsItem,
+    company_market_cap_score: float = 0.0,
+) -> float:
+    """Priority score for deciding which pending news items to summarize first."""
+    source_weight = (news_item.source_weight or 0.5) * 100.0
+    text = (news_item.content_text or news_item.excerpt or "")[:5000]
+    material = material_event_score(text)
+    recency = recency_score(news_item.published_at)
+
+    return round(
+        0.25 * source_weight
+        + 0.30 * material
+        + 0.15 * company_market_cap_score
+        + 0.30 * recency,
+        2,
+    )
+
+
 def material_event_score(text: str | None) -> float:
     if not text:
         return 0.0

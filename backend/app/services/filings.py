@@ -20,7 +20,7 @@ from app.services.constants import ANNUAL_FORMS, FILING_SECTION_PATTERNS, INTERI
 from app.services.html_pdf import render_html_to_pdf
 from app.services.market_data import MarketDataClient
 from app.services.pdf import build_pdf_from_text
-from app.services.ranking import company_market_cap_percentiles, compute_filing_scores, compute_pending_filing_scores
+from app.services.ranking import company_market_cap_percentiles, compute_filing_scores, compute_pending_filing_scores, summary_priority_score
 from app.services.sec import SECClient
 from app.services.storage import ObjectStore
 from app.services.summary_budget import SummaryBudgetService
@@ -448,7 +448,17 @@ class FilingService:
         self.session.commit()
         return created
 
-    def reprocess_company_filings(self, company_id: int, limit: int | None = None, *, resummarize: bool = True) -> int:
+    def reprocess_company_filings(
+        self,
+        company_id: int,
+        limit: int | None = None,
+        *,
+        resummarize: bool = True,
+        max_summaries: int = 5,
+    ) -> int:
+        """Reprocess filings for a company. Limits AI summarization to max_summaries
+        to prevent budget spikes. Remaining filings are reprocessed for text/PDF
+        but left in 'pending' summary status for scheduled pickup."""
         company = self.session.get(Company, company_id)
         if not company:
             raise ValueError(f"Unknown company id={company_id}")
@@ -457,8 +467,12 @@ class FilingService:
             select(Filing.id).where(Filing.company_id == company_id).order_by(Filing.filed_at.desc())
         ).all()
         updated = 0
+        summaries_done = 0
         for filing_id in filing_ids[: limit or None]:
-            updated += int(self.reprocess_existing_filing(filing_id, commit=True, resummarize=resummarize))
+            should_summarize = resummarize and summaries_done < max_summaries
+            updated += int(self.reprocess_existing_filing(filing_id, commit=True, resummarize=should_summarize))
+            if should_summarize:
+                summaries_done += 1
             self.session.expunge_all()
         return updated
 
@@ -591,12 +605,18 @@ class FilingService:
         if effective_limit <= 0:
             return {"summarized": 0, "remaining_daily_budget": remaining_daily}
 
-        candidates = self.session.execute(
+        raw_candidates = self.session.execute(
             select(Filing, Company)
             .join(Company, Filing.company_id == Company.id)
             .where(Filing.summary_status.in_(["pending", "failed"]), Filing.summary_attempts < 3)
-            .order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
         ).all()
+        # Sort by materiality-aware priority score instead of composite_score
+        market_caps = company_market_cap_percentiles(self.session)
+        candidates = sorted(
+            raw_candidates,
+            key=lambda row: summary_priority_score(row[0], market_caps.get(row[1].id, 0.0)),
+            reverse=True,
+        )
 
         cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
         summarized = 0
@@ -728,6 +748,7 @@ class FilingService:
             text=self._summary_source_text(filing),
             company_name=company.name,
             evidence_sections=list((filing.parsed_sections or {}).keys()),
+            form_type=filing.form_type,
         )
         filing.summary_json = summary.model_dump()
         filing.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
@@ -736,6 +757,28 @@ class FilingService:
         filing.summary_attempts += 1
         filing.extra_metadata = {**(filing.extra_metadata or {}), "summary_trigger": trigger}
         self._apply_scores(filing, company, prior_filing=prior_filing)
+
+        # Generate diff analysis for periodic filings with a prior comparable
+        if (
+            prior_filing
+            and prior_filing.summary_status == "complete"
+            and filing.normalized_form_type not in ("8-K",)
+            and self.settings.openai_api_key
+        ):
+            budget_service = SummaryBudgetService(self.session)
+            if budget_service.remaining("diff") > 0:
+                try:
+                    diff_result = self.summarizer.summarize_diff(
+                        form_type=filing.form_type,
+                        company_name=company.name,
+                        current_text=self._summary_source_text(filing),
+                        prior_text=self._summary_source_text(prior_filing),
+                    )
+                    filing.diff_json = diff_result
+                    filing.diff_status = "complete" if "summary" in diff_result else "failed"
+                    budget_service.record("diff", 1)
+                except Exception:
+                    filing.diff_status = "failed"
 
     def _apply_scores(
         self,

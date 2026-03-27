@@ -22,6 +22,7 @@ class ExtractedEntity(BaseModel):
 
 class SummaryPayload(BaseModel):
     summary: str = ""
+    event_type: str = ""  # Populated for 8-K filings (e.g., "leadership-change", "acquisition")
     key_takeaways: list[str] = Field(default_factory=list)
     material_changes: list[str] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)

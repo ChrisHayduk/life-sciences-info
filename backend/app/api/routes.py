@@ -18,7 +18,7 @@ from app.jobs import (
     run_retag_news_companies,
     run_summarize_pending,
 )
-from app.models import Company, Digest, Filing, NewsItem
+from app.models import Company, Digest, Filing, NewsItem, SummaryUsage
 from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
 from app.services.clinical_trials import ClinicalTrialsService
 from app.services.events import event_stream
@@ -412,3 +412,44 @@ def delete_watchlist(watchlist_id: int, session: Session = Depends(get_session))
     session.delete(watchlist)
     session.commit()
     return {"status": "ok", "message": f"Watchlist {watchlist_id} deleted."}
+
+
+# ── Usage stats ──
+
+@router.get("/admin/usage-stats", dependencies=[Depends(require_admin_token)])
+def admin_usage_stats(days: int = 7, session: Session = Depends(get_session)):
+    """Return AI usage statistics for the last N days."""
+    from datetime import date, timedelta
+
+    cutoff = date.today() - timedelta(days=days)
+    rows = session.scalars(
+        select(SummaryUsage)
+        .where(SummaryUsage.usage_date >= cutoff)
+        .order_by(SummaryUsage.usage_date.desc(), SummaryUsage.kind)
+    ).all()
+
+    daily_stats = []
+    for row in rows:
+        daily_stats.append({
+            "date": row.usage_date.isoformat(),
+            "kind": row.kind,
+            "count": row.count,
+            "prompt_tokens": row.prompt_tokens,
+            "completion_tokens": row.completion_tokens,
+            "total_tokens": row.prompt_tokens + row.completion_tokens,
+            "estimated_cost_usd": round(row.estimated_cost_usd, 4),
+        })
+
+    total_calls = sum(r.count for r in rows)
+    total_tokens = sum(r.prompt_tokens + r.completion_tokens for r in rows)
+    total_cost = sum(r.estimated_cost_usd for r in rows)
+
+    return {
+        "period_days": days,
+        "daily": daily_stats,
+        "totals": {
+            "calls": total_calls,
+            "tokens": total_tokens,
+            "estimated_cost_usd": round(total_cost, 4),
+        },
+    }

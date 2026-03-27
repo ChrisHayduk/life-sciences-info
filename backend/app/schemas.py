@@ -14,6 +14,12 @@ class ScoreExplanation(BaseModel):
     confidence: str = "high"
 
 
+class ExtractedEntity(BaseModel):
+    name: str
+    type: str
+    context: str = ""
+
+
 class SummaryPayload(BaseModel):
     summary: str = ""
     key_takeaways: list[str] = Field(default_factory=list)
@@ -22,6 +28,7 @@ class SummaryPayload(BaseModel):
     opportunity_flags: list[str] = Field(default_factory=list)
     company_mentions: list[str] = Field(default_factory=list)
     evidence_sections: list[str] = Field(default_factory=list)
+    entities: list[ExtractedEntity] = Field(default_factory=list)
     importance_score: float = 0.0
     market_cap_score: float = 0.0
     composite_score: float = 0.0
@@ -72,8 +79,11 @@ class FilingDetail(FilingListItem):
     risk_flags: list[str] = Field(default_factory=list)
     opportunity_flags: list[str] = Field(default_factory=list)
     evidence_sections: list[str] = Field(default_factory=list)
+    entities: list[ExtractedEntity] = Field(default_factory=list)
     prior_comparable_filing_id: int | None = None
     prior_comparable_filing_url: str | None = None
+    diff_json: dict = Field(default_factory=dict)
+    diff_status: str = "pending"
 
 
 class NewsItemResponse(BaseModel):
@@ -94,12 +104,22 @@ class NewsItemResponse(BaseModel):
     key_takeaways: list[str] = Field(default_factory=list)
 
 
+class CompanyTrend(BaseModel):
+    direction: str = "insufficient_data"
+    trend_score: float = 0.0
+    risk_trend: str = "stable"
+    opportunity_trend: str = "stable"
+    filings_analyzed: int = 0
+
+
 class CompanyDetailResponse(CompanyResponse):
     market_cap_updated_at: datetime | None = None
     filings_count: int = 0
     news_count: int = 0
     recent_filings: list[FilingListItem] = Field(default_factory=list)
     recent_news: list[NewsItemResponse] = Field(default_factory=list)
+    trend: CompanyTrend | dict = Field(default_factory=dict)
+    pipeline: dict = Field(default_factory=dict)
 
 
 class DigestResponse(BaseModel):

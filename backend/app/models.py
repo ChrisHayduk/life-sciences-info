@@ -29,6 +29,7 @@ class Company(Base, TimestampMixin):
     market_cap_source: Mapped[str | None] = mapped_column(String(64))
     market_cap_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
     extra_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
 
     filings: Mapped[list[Filing]] = relationship(back_populates="company", cascade="all, delete-orphan")
@@ -72,6 +73,9 @@ class Filing(Base, TimestampMixin):
     score_confidence: Mapped[str] = mapped_column(String(32), default="high")
     raw_artifact_key: Mapped[str | None] = mapped_column(String(255))
     pdf_artifact_key: Mapped[str | None] = mapped_column(String(255))
+    item_numbers: Mapped[list] = mapped_column(JSON, default=list)
+    diff_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    diff_status: Mapped[str] = mapped_column(String(32), default="pending")
     extra_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
 
     company: Mapped[Company] = relationship(back_populates="filings", foreign_keys=[company_id])
@@ -110,6 +114,20 @@ class NewsItem(Base, TimestampMixin):
     extra_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class FilingNewsLink(Base):
+    """Association between a filing and a news item that cover the same event."""
+    __tablename__ = "filing_news_links"
+    __table_args__ = (
+        UniqueConstraint("filing_id", "news_item_id", name="uq_filing_news_link"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    filing_id: Mapped[int] = mapped_column(ForeignKey("filings.id"), index=True)
+    news_item_id: Mapped[int] = mapped_column(ForeignKey("news_items.id"), index=True)
+    link_type: Mapped[str] = mapped_column(String(32), default="temporal")
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+
+
 class Digest(Base, TimestampMixin):
     __tablename__ = "digests"
     __table_args__ = (
@@ -124,6 +142,43 @@ class Digest(Base, TimestampMixin):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     narrative_summary: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class ClinicalTrial(Base, TimestampMixin):
+    """Clinical trial data sourced from ClinicalTrials.gov."""
+    __tablename__ = "clinical_trials"
+    __table_args__ = (
+        UniqueConstraint("nct_id", name="uq_clinical_trials_nct_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    nct_id: Mapped[str] = mapped_column(String(16), index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), index=True)
+    title: Mapped[str] = mapped_column(String(512))
+    phase: Mapped[str | None] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(64), index=True)
+    conditions: Mapped[list] = mapped_column(JSON, default=list)
+    interventions: Mapped[list] = mapped_column(JSON, default=list)
+    sponsor: Mapped[str | None] = mapped_column(String(255))
+    start_date: Mapped[date | None] = mapped_column(Date)
+    primary_completion_date: Mapped[date | None] = mapped_column(Date)
+    last_update_date: Mapped[date | None] = mapped_column(Date, index=True)
+    enrollment: Mapped[int | None] = mapped_column(Integer)
+    study_type: Mapped[str | None] = mapped_column(String(64))
+    extra_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    company: Mapped[Company | None] = relationship(foreign_keys=[company_id])
+
+
+class Watchlist(Base, TimestampMixin):
+    """User-defined watchlist for tracking specific companies and topics."""
+    __tablename__ = "watchlists"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(128))
+    company_ids: Mapped[list] = mapped_column(JSON, default=list)
+    form_types: Mapped[list] = mapped_column(JSON, default=list)
+    topic_tags: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class SummaryUsage(Base, TimestampMixin):

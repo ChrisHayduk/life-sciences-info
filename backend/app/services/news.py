@@ -168,9 +168,47 @@ class NewsService:
         rows = self.session.scalars(query.limit(limit)).all()
         return [self._to_response(item) for item in rows]
 
+    def list_news_paginated(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        source_name: str | None = None,
+        search: str | None = None,
+        sort_by: str = "composite_score",
+    ) -> dict:
+        from sqlalchemy import func as sa_func
+
+        query = select(NewsItem)
+        count_query = select(sa_func.count()).select_from(NewsItem)
+
+        if source_name:
+            query = query.where(NewsItem.source_name == source_name)
+            count_query = count_query.where(NewsItem.source_name == source_name)
+        if search:
+            pattern = f"%{search}%"
+            query = query.where(NewsItem.title.ilike(pattern))
+            count_query = count_query.where(NewsItem.title.ilike(pattern))
+
+        if sort_by == "published_at":
+            query = query.order_by(NewsItem.published_at.desc(), NewsItem.composite_score.desc())
+        else:
+            query = query.order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc())
+
+        total = self.session.scalar(count_query) or 0
+        rows = self.session.scalars(query.offset(offset).limit(limit)).all()
+        items = [self._to_response(item) for item in rows]
+        return {"items": items, "total": total, "offset": offset, "limit": limit}
+
     def list_news_for_company(self, company: Company, limit: int = 20) -> list[NewsItemResponse]:
         matches = self._news_items_for_company(company)
         return [self._to_response(item) for item in matches[:limit]]
+
+    def list_news_for_company_by_id(self, company_id: int, limit: int = 20) -> list[NewsItemResponse]:
+        """List news for a company by ID (used by watchlist feed)."""
+        company = self.session.get(Company, company_id)
+        if not company:
+            return []
+        return self.list_news_for_company(company, limit=limit)
 
     def count_news_for_company(self, company: Company) -> int:
         return len(self._news_items_for_company(company))
@@ -308,6 +346,8 @@ class NewsService:
         news_item.score_explanation = dict(scores["score_explanation"])
 
     def _fetch_article_text(self, url: str) -> str:
+        from app.services.constants import SITE_ARTICLE_SELECTORS
+
         if not url:
             return ""
         try:
@@ -316,11 +356,21 @@ class NewsService:
         except Exception:
             return ""
         soup = BeautifulSoup(response.text, "html.parser")
+
+        # Try per-site CSS selector first
+        parsed_domain = urlparse(url).netloc.lower()
+        for domain, selector in SITE_ARTICLE_SELECTORS.items():
+            if domain in parsed_domain:
+                element = soup.select_one(selector)
+                if element:
+                    return element.get_text(" ", strip=True)
+
+        # Generic fallback: <article> tag or all <p> tags
         article = soup.find("article")
         if article:
             return article.get_text(" ", strip=True)
         paragraphs = [tag.get_text(" ", strip=True) for tag in soup.find_all("p")]
-        return " ".join(paragraphs[:25])
+        return " ".join(paragraphs[:40])
 
     @staticmethod
     def _should_skip_entry(title: str) -> bool:
@@ -340,33 +390,48 @@ class NewsService:
         return [topic for topic, markers in topic_map.items() if any(marker in lowered for marker in markers)]
 
     @staticmethod
-    def _company_aliases(companies: Iterable[Company]) -> list[tuple[str, int, str]]:
-        aliases: list[tuple[str, int, str]] = []
-        seen: set[tuple[str, int, str]] = set()
+    def _company_aliases(companies: Iterable[Company]) -> list[tuple[str, int, str, bool]]:
+        """Returns (normalized_alias, company_id, mention_value, requires_word_boundary)."""
+        aliases: list[tuple[str, int, str, bool]] = []
+        seen: set[tuple[str, int]] = set()
         for company in companies:
-            candidates = [(company.name, company.name)]
+            candidates: list[tuple[str, str]] = [(company.name, company.name)]
             if company.ticker:
                 candidates.append((company.ticker, company.ticker))
+            # Include extra aliases from the model (drug names, subsidiaries)
+            for extra in getattr(company, "aliases", None) or []:
+                if extra:
+                    candidates.append((extra, extra))
             for raw_alias, mention_value in candidates:
                 normalized = _normalize_company_text(raw_alias)
                 if not normalized:
                     continue
-                entry = (normalized, company.id, mention_value)
-                if entry in seen:
+                key = (normalized, company.id)
+                if key in seen:
                     continue
-                seen.add(entry)
-                aliases.append(entry)
+                seen.add(key)
+                # Short aliases (1-2 chars like "A", "AI") need word-boundary matching
+                requires_word_boundary = len(normalized) < 3
+                aliases.append((normalized, company.id, mention_value, requires_word_boundary))
         aliases.sort(key=lambda item: (-len(item[0]), item[0], item[1]))
         return aliases
 
     @staticmethod
-    def _detect_companies(text: str, aliases: list[tuple[str, int, str]]) -> tuple[list[str], list[int]]:
-        normalized_text = f" {_normalize_company_text(text)} "
+    def _detect_companies(text: str, aliases: list[tuple[str, int, str, bool]]) -> tuple[list[str], list[int]]:
+        normalized_text = _normalize_company_text(text)
+        padded_text = f" {normalized_text} "
         mentioned_companies: list[str] = []
         company_tag_ids: list[int] = []
-        for alias, company_id, mention_value in aliases:
-            if not alias or f" {alias} " not in normalized_text:
+        for alias, company_id, mention_value, requires_word_boundary in aliases:
+            if not alias:
                 continue
+            if requires_word_boundary:
+                # Use regex word boundary for short tickers to avoid false positives
+                if not re.search(rf"\b{re.escape(alias)}\b", normalized_text):
+                    continue
+            else:
+                if f" {alias} " not in padded_text:
+                    continue
             if company_id not in company_tag_ids:
                 if len(company_tag_ids) >= COMPANY_TAG_LIMIT:
                     continue

@@ -519,6 +519,7 @@ class FilingService:
         form_type = (filing_row.get("form") or "").upper()
         if not is_target_form(form_type):
             return False
+        normalized_form_type = normalize_form_type(form_type)
         accession_number = filing_row.get("accessionNumber")
         if not accession_number:
             return False
@@ -530,7 +531,7 @@ class FilingService:
         filing_doc = self.sec_client.download_primary_document(company.cik, accession_number, primary_document)
         raw_text = html_to_text(filing_doc.content, filing_doc.content_type)
 
-        if normalize_form_type(form_type) == "6-K" and not is_periodic_6k(
+        if normalized_form_type == "6-K" and not is_periodic_6k(
             filing_row.get("primaryDocDescription"),
             raw_text,
             filing_row.get("items"),
@@ -554,13 +555,13 @@ class FilingService:
             company_id=company.id,
             accession_number=accession_number,
             form_type=form_type,
-            normalized_form_type=normalize_form_type(form_type),
+            normalized_form_type=normalized_form_type,
             title=filing_row.get("primaryDocDescription") or f"{company.name} {form_type}",
             description=filing_row.get("primaryDocDescription"),
             filed_at=self._parse_datetime(filing_row.get("acceptanceDateTime") or filing_row.get("filingDate")),
             period_end_date=self._parse_date(filing_row.get("reportDate")),
             is_amendment=form_type.endswith("/A"),
-            is_periodic_equivalent=True,
+            is_periodic_equivalent=normalized_form_type != "8-K",
             filing_url=filing_urls["filing_url"],
             original_document_url=filing_urls["original_document_url"],
             source_json_url=None,

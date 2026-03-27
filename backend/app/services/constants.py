@@ -20,12 +20,13 @@ TARGET_FORMS = {
     "40-F/A",
     "6-K",
     "6-K/A",
-    "8-K",
-    "8-K/A",
 }
 
 ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 INTERIM_FORMS = {"10-Q", "10-Q/A", "6-K", "6-K/A"}
+# Automated SEC backfills and polling currently target periodic-equivalent
+# filings only. Event filings remain supported downstream when created by
+# another ingestion path.
 EVENT_FORMS = {"8-K", "8-K/A"}
 
 # 8-K item numbers mapped to human-readable event categories
@@ -122,4 +123,3 @@ SITE_ARTICLE_SELECTORS: dict[str, str] = {
     "biopharmadive.com": "article .article-body",
     "genengnews.com": "article .entry-content",
 }
-

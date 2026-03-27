@@ -2,7 +2,44 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { EmptyPanel, FilingCard, NewsCard, SectionHeader, StatCard } from "@/components/cards";
-import { api, formatCurrency, formatDate, formatMarketCap } from "@/lib/api";
+import { api, FilingListItem, formatCurrency, formatDate, formatMarketCap } from "@/lib/api";
+
+const FILING_TYPE_LABELS: Record<string, string> = {
+  "10-K": "10-K",
+  "20-F": "20-F",
+  "40-F": "40-F",
+  "10-Q": "10-Q",
+  "6-K": "6-K"
+};
+
+function groupFilingsByType(filings: FilingListItem[]) {
+  const groups: Array<{ formType: string; filings: FilingListItem[] }> = [];
+
+  for (const filing of filings) {
+    const lastGroup = groups[groups.length - 1];
+    if (lastGroup && lastGroup.formType === filing.normalized_form_type) {
+      lastGroup.filings.push(filing);
+      continue;
+    }
+    groups.push({ formType: filing.normalized_form_type, filings: [filing] });
+  }
+
+  return groups;
+}
+
+function findLatestFiling(filings: FilingListItem[]) {
+  return filings.reduce<FilingListItem | null>((latest, filing) => {
+    if (!latest) {
+      return filing;
+    }
+    const latestTime = new Date(latest.filed_at).getTime();
+    const filingTime = new Date(filing.filed_at).getTime();
+    if (filingTime !== latestTime) {
+      return filingTime > latestTime ? filing : latest;
+    }
+    return filing.composite_score > latest.composite_score ? filing : latest;
+  }, null);
+}
 
 export default async function CompanyDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -11,6 +48,9 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
   if (!company) {
     notFound();
   }
+
+  const filingGroups = groupFilingsByType(company.recent_filings);
+  const latestFiling = findLatestFiling(company.recent_filings);
 
   return (
     <>
@@ -64,11 +104,25 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
           <SectionHeader
             eyebrow="Filings"
             title="Recent company disclosures"
-            description="Ranked periodic filings for this issuer, with AI summaries and direct document access."
+            description="Periodic filings grouped by form type priority, with the newest filings shown first inside each type."
           />
           <div className="grid-1">
-            {company.recent_filings.length ? (
-              company.recent_filings.map((filing) => <FilingCard key={filing.id} filing={filing} />)
+            {filingGroups.length ? (
+              filingGroups.map((group) => (
+                <div key={group.formType} className="detail-section">
+                  <div className="panel-topline">
+                    <span className="tag">{FILING_TYPE_LABELS[group.formType] ?? group.formType}</span>
+                    <span>
+                      {group.filings.length} filing{group.filings.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <div className="grid-1">
+                    {group.filings.map((filing) => (
+                      <FilingCard key={filing.id} filing={filing} />
+                    ))}
+                  </div>
+                </div>
+              ))
             ) : (
               <EmptyPanel title="No filings yet" body="Run the company backfill job to load historical SEC documents." />
             )}
@@ -93,8 +147,8 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
       <section className="detail-section">
         <div className="link-row">
           <Link href="/companies">Back to companies</Link>
-          {company.recent_filings.length ? (
-            <Link href={`/filings/${company.recent_filings[0].id}`}>Open latest filing</Link>
+          {latestFiling ? (
+            <Link href={`/filings/${latestFiling.id}`}>Open most recent filing</Link>
           ) : null}
         </div>
       </section>

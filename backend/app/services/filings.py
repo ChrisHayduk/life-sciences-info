@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from bs4.element import Comment
 from dateutil import parser as date_parser
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import select
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -50,6 +50,13 @@ SECTION_ORDER = [
     "financial_statements",
     "subsequent_events",
 ]
+COMPANY_FILING_TYPE_PRIORITY = {
+    "10-K": 0,
+    "20-F": 1,
+    "40-F": 2,
+    "10-Q": 3,
+    "6-K": 4,
+}
 ITEM_HEADER_RE = re.compile(r"(?im)^\s*(?:part\s+[ivx]+\s*)?item\s+\d+[a-z]?\.")
 URL_ONLY_RE = re.compile(r"^(?:https?://\S+\s*)+$", re.IGNORECASE)
 NAMESPACE_TOKEN_RE = re.compile(r"^[a-z][\w.-]*:[\w.-]+$", re.IGNORECASE)
@@ -802,13 +809,16 @@ class FilingService:
         company_id: int | None = None,
         recent_days: int | None = None,
     ) -> list[FilingListItem]:
-        query = (
-            select(Filing, Company)
-            .join(Company, Filing.company_id == Company.id)
-            .order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
-        )
+        query = select(Filing, Company).join(Company, Filing.company_id == Company.id)
         if company_id:
             query = query.where(Filing.company_id == company_id)
+            query = query.order_by(
+                case(COMPANY_FILING_TYPE_PRIORITY, value=Filing.normalized_form_type, else_=99),
+                Filing.filed_at.desc(),
+                Filing.composite_score.desc(),
+            )
+        else:
+            query = query.order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
         if recent_days is not None:
             cutoff = datetime.now(UTC) - timedelta(days=recent_days)
             query = query.where(Filing.filed_at >= cutoff)

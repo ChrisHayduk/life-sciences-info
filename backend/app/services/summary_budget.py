@@ -29,7 +29,14 @@ class SummaryBudgetService:
         )
         return usage.count if usage else 0
 
-    def record(self, kind: str, count: int) -> None:
+    def record(
+        self,
+        kind: str,
+        count: int,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        estimated_cost_usd: float = 0.0,
+    ) -> None:
         if count <= 0:
             return
         usage = self.session.scalar(
@@ -43,6 +50,9 @@ class SummaryBudgetService:
             self.session.add(usage)
             self.session.flush()
         usage.count += count
+        usage.prompt_tokens += prompt_tokens
+        usage.completion_tokens += completion_tokens
+        usage.estimated_cost_usd += estimated_cost_usd
         self.session.flush()
 
     def _limit_for_kind(self, kind: str) -> int:
@@ -50,6 +60,10 @@ class SummaryBudgetService:
             return self.settings.max_filing_summaries_per_day
         if kind == "news":
             return self.settings.max_news_summaries_per_day
+        if kind == "diff":
+            return 6  # Filing-over-filing diff analyses per day
+        if kind == "digest":
+            return 2  # Weekly digest narrative attempts per day
         raise ValueError(f"Unsupported summary budget kind: {kind}")
 
     def _today_local_date(self) -> date:

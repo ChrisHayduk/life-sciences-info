@@ -191,3 +191,6 @@ class SummaryUsage(Base, TimestampMixin):
     usage_date: Mapped[date] = mapped_column(Date, index=True)
     kind: Mapped[str] = mapped_column(String(32), index=True)
     count: Mapped[int] = mapped_column(Integer, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)

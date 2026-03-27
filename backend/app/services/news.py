@@ -19,7 +19,7 @@ from app.config import get_settings
 from app.models import Company, NewsItem
 from app.schemas import NewsItemResponse
 from app.services.constants import NEWS_FEEDS
-from app.services.ranking import company_market_cap_percentiles, compute_news_scores, compute_pending_news_scores
+from app.services.ranking import company_market_cap_percentiles, compute_news_scores, compute_pending_news_scores, news_summary_priority_score
 from app.services.summary_budget import SummaryBudgetService
 from app.services.summarization import OpenAISummarizer
 
@@ -129,12 +129,21 @@ class NewsService:
             return {"summarized": 0, "remaining_daily_budget": remaining_daily}
 
         companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        market_caps = company_market_cap_percentiles(self.session)
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.settings.news_summary_backlog_days)
-        candidates = self.session.scalars(
+        raw_candidates = self.session.scalars(
             select(NewsItem)
             .where(NewsItem.summary_status.in_(["pending", "failed"]), NewsItem.summary_attempts < 3)
-            .order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc())
         ).all()
+        # Sort by materiality-aware priority instead of composite_score
+        candidates = sorted(
+            raw_candidates,
+            key=lambda item: news_summary_priority_score(
+                item,
+                max((market_caps.get(cid, 0.0) for cid in (item.company_tag_ids or [])), default=0.0),
+            ),
+            reverse=True,
+        )
 
         summarized = 0
         for news_item in candidates:
@@ -308,10 +317,11 @@ class NewsService:
         )
 
     def _apply_summary(self, news_item: NewsItem, *, trigger: str) -> None:
+        source_text = (news_item.content_text or news_item.excerpt or news_item.title)[:12000]
         summary = self.summarizer.summarize(
             kind="news",
             title=news_item.title,
-            text=news_item.content_text or news_item.excerpt or news_item.title,
+            text=source_text,
             company_name=", ".join(news_item.mentioned_companies) if news_item.mentioned_companies else None,
             evidence_sections=news_item.topic_tags or [],
         )

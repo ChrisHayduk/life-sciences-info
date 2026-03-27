@@ -111,6 +111,7 @@ def test_rerank_after_market_cap_refresh_updates_existing_filing_and_news_scores
         published_at=datetime(2026, 3, 21, 12, 0, tzinfo=timezone.utc),
         article_hash="hash-1",
         mentioned_companies=["Apex Bio", "ABIO"],
+        company_tag_ids=[company.id],
         topic_tags=["manufacturing"],
         summary_status="pending",
         market_cap_score=0.0,

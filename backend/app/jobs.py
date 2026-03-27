@@ -145,6 +145,27 @@ def run_ingest_news() -> dict[str, int]:
     return _with_session(_run)
 
 
+def run_retag_news_companies(
+    *,
+    limit: int | None = None,
+    recent_days: int | None = None,
+    focus_tickers: list[str] | None = None,
+) -> dict[str, int]:
+    def _run(session):
+        return NewsService(session).retag_company_news(
+            limit=limit,
+            recent_days=recent_days,
+            focus_tickers=focus_tickers,
+        )
+
+    result = _with_session(_run)
+    return {
+        "scanned": int(result["scanned"]),
+        "updated": int(result["updated"]),
+        "reranked": int(result["reranked"]),
+    }
+
+
 def run_build_weekly_digest() -> int:
     digest = _with_session(lambda session: DigestService(session).build_weekly_digest())
     return digest.id
@@ -358,6 +379,18 @@ def main() -> None:
 
     subparsers.add_parser("poll-sec-filings", help="Poll covered companies for newly filed periodic reports.")
     subparsers.add_parser("ingest-news", help="Pull configured news feeds and summarize new items.")
+    retag_news_parser = subparsers.add_parser(
+        "retag-news-companies",
+        help="Normalize explicit company tags for stored news items and rerank affected stories.",
+    )
+    retag_news_parser.add_argument("--all", action="store_true")
+    retag_news_parser.add_argument("--limit", type=int, default=None)
+    retag_news_parser.add_argument("--recent-days", type=int, default=None)
+    retag_news_parser.add_argument(
+        "--focus-tickers",
+        default="",
+        help="Comma-separated tickers to constrain the retagging pass, e.g. MRK,PFE,AMGN",
+    )
     subparsers.add_parser("build-weekly-digest", help="Build the current weekly digest.")
 
     summarize_pending_parser = subparsers.add_parser(
@@ -461,6 +494,19 @@ def main() -> None:
             f"Ingested {result['new_items']} news items, "
             f"summarized {result['summarized']}, "
             f"{result['remaining_daily_budget']} daily budget remaining",
+            flush=True,
+        )
+        return
+    if args.command == "retag-news-companies":
+        focus_tickers = [ticker.strip().upper() for ticker in args.focus_tickers.split(",") if ticker.strip()]
+        result = run_retag_news_companies(
+            limit=args.limit,
+            recent_days=args.recent_days,
+            focus_tickers=focus_tickers or None,
+        )
+        print(
+            f"Retagged company links for {result['updated']} of {result['scanned']} news items; "
+            f"{result['reranked']} reranked",
             flush=True,
         )
         return

@@ -11,6 +11,7 @@ from app.jobs import (
     run_poll_sec_filings,
     run_refresh_market_caps,
     run_resummarize_item,
+    run_retag_news_companies,
     run_summarize_pending,
     run_sync_universe,
 )
@@ -43,6 +44,11 @@ def poll_sec_filings() -> dict[str, int]:
 @dramatiq.actor
 def ingest_news() -> dict[str, int]:
     return run_ingest_news()
+
+
+@dramatiq.actor
+def retag_news_companies(limit: int | None = None, recent_days: int | None = None) -> dict[str, int]:
+    return run_retag_news_companies(limit=limit, recent_days=recent_days)
 
 
 @dramatiq.actor

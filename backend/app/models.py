@@ -96,6 +96,7 @@ class NewsItem(Base, TimestampMixin):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     article_hash: Mapped[str] = mapped_column(String(64))
     mentioned_companies: Mapped[list[str]] = mapped_column(JSON, default=list)
+    company_tag_ids: Mapped[list[int] | None] = mapped_column(JSON, default=list)
     topic_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
     summary_model: Mapped[str | None] = mapped_column(String(64))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -21,6 +22,10 @@ from app.services.constants import NEWS_FEEDS
 from app.services.ranking import company_market_cap_percentiles, compute_news_scores, compute_pending_news_scores
 from app.services.summary_budget import SummaryBudgetService
 from app.services.summarization import OpenAISummarizer
+
+COMPANY_TAG_LIMIT = 10
+NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+MULTISPACE_RE = re.compile(r"\s+")
 
 
 def _normalize_url(url: str) -> str:
@@ -46,6 +51,11 @@ def _published_at(entry: feedparser.FeedParserDict) -> datetime:
 
 def _clean_html_text(value: str | None) -> str:
     return BeautifulSoup(unescape(value or ""), "html.parser").get_text(" ", strip=True)
+
+
+def _normalize_company_text(value: str) -> str:
+    normalized = NON_ALNUM_RE.sub(" ", (value or "").lower())
+    return MULTISPACE_RE.sub(" ", normalized).strip()
 
 
 class NewsService:
@@ -81,7 +91,7 @@ class NewsService:
 
                 excerpt = _clean_html_text(entry.get("summary")) or None
                 article_text = self._fetch_article_text(canonical_url) or excerpt or title
-                mentioned = self._detect_companies(f"{title}\n{article_text}", company_aliases)
+                mentioned, company_tag_ids = self._detect_companies(f"{title}\n{article_text}", company_aliases)
                 topic_tags = sorted(set(feed["topic_tags"] + self._infer_topics(title, article_text)))
 
                 news_item = NewsItem(
@@ -95,6 +105,7 @@ class NewsService:
                     published_at=_published_at(entry),
                     article_hash=article_hash,
                     mentioned_companies=mentioned,
+                    company_tag_ids=company_tag_ids,
                     topic_tags=topic_tags,
                 )
                 self.session.add(news_item)
@@ -164,6 +175,59 @@ class NewsService:
     def count_news_for_company(self, company: Company) -> int:
         return len(self._news_items_for_company(company))
 
+    def retag_company_news(
+        self,
+        *,
+        limit: int | None = None,
+        recent_days: int | None = None,
+        focus_tickers: list[str] | None = None,
+    ) -> dict[str, int]:
+        companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        if not companies:
+            return {"scanned": 0, "updated": 0, "reranked": 0}
+
+        focus_set = {ticker.upper() for ticker in (focus_tickers or [])}
+        focus_company_ids = {
+            company.id
+            for company in companies
+            if focus_set and (company.ticker or "").upper() in focus_set
+        }
+        company_aliases = self._company_aliases(companies)
+        market_caps = company_market_cap_percentiles(self.session)
+
+        query = select(NewsItem).order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
+        if recent_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
+            query = query.where(NewsItem.published_at >= cutoff)
+        news_items = self.session.scalars(query).all()
+
+        scanned = 0
+        updated = 0
+        reranked = 0
+        for news_item in news_items:
+            text = f"{news_item.title or ''}\n{news_item.content_text or news_item.excerpt or ''}"
+            mentioned, company_tag_ids = self._detect_companies(text, company_aliases)
+            if focus_set and not (
+                focus_company_ids.intersection(company_tag_ids) or focus_company_ids.intersection(set(news_item.company_tag_ids or []))
+            ):
+                continue
+            if limit is not None and scanned >= limit:
+                break
+            scanned += 1
+
+            existing_mentions = news_item.mentioned_companies or []
+            existing_company_tags = news_item.company_tag_ids or []
+            if mentioned != existing_mentions or company_tag_ids != existing_company_tags:
+                news_item.mentioned_companies = mentioned
+                news_item.company_tag_ids = company_tag_ids
+                updated += 1
+
+            self._apply_scores(news_item, companies, market_caps=market_caps)
+            reranked += 1
+
+        self.session.commit()
+        return {"scanned": scanned, "updated": updated, "reranked": reranked}
+
     def rerank_for_companies(self, company_ids: Iterable[int] | None = None) -> int:
         target_ids = sorted({int(company_id) for company_id in (company_ids or [])})
         if company_ids is not None and not target_ids:
@@ -173,21 +237,11 @@ class NewsService:
         if not companies:
             return 0
 
-        target_aliases: set[str] | None = None
-        if target_ids:
-            target_aliases = set()
-            for company in companies:
-                if company.id not in target_ids:
-                    continue
-                target_aliases.add(company.name)
-                if company.ticker:
-                    target_aliases.add(company.ticker)
-
         news_items = self.session.scalars(select(NewsItem).order_by(NewsItem.published_at.desc(), NewsItem.id.desc())).all()
         market_caps = company_market_cap_percentiles(self.session)
         updated = 0
         for news_item in news_items:
-            if target_aliases is not None and not (set(news_item.mentioned_companies or []) & target_aliases):
+            if target_ids and not set(news_item.company_tag_ids or []).intersection(target_ids):
                 continue
             self._apply_scores(news_item, companies, market_caps=market_caps)
             updated += 1
@@ -241,7 +295,7 @@ class NewsService:
         company_scores = [
             market_caps.get(company.id, 0.0)
             for company in companies
-            if company.name in news_item.mentioned_companies or (company.ticker and company.ticker in news_item.mentioned_companies)
+            if company.id in set(news_item.company_tag_ids or [])
         ]
         market_score = max(company_scores) if company_scores else 0.0
         if news_item.summary_status == "complete":
@@ -286,33 +340,41 @@ class NewsService:
         return [topic for topic, markers in topic_map.items() if any(marker in lowered for marker in markers)]
 
     @staticmethod
-    def _company_aliases(companies: Iterable[Company]) -> dict[str, str]:
-        aliases: dict[str, str] = {}
+    def _company_aliases(companies: Iterable[Company]) -> list[tuple[str, int, str]]:
+        aliases: list[tuple[str, int, str]] = []
+        seen: set[tuple[str, int, str]] = set()
         for company in companies:
-            aliases[company.name.lower()] = company.name
+            candidates = [(company.name, company.name)]
             if company.ticker:
-                aliases[company.ticker.lower()] = company.ticker
-            normalized = company.name.lower().replace(",", "").replace(".", "")
-            aliases[normalized] = company.name
+                candidates.append((company.ticker, company.ticker))
+            for raw_alias, mention_value in candidates:
+                normalized = _normalize_company_text(raw_alias)
+                if not normalized:
+                    continue
+                entry = (normalized, company.id, mention_value)
+                if entry in seen:
+                    continue
+                seen.add(entry)
+                aliases.append(entry)
+        aliases.sort(key=lambda item: (-len(item[0]), item[0], item[1]))
         return aliases
 
     @staticmethod
-    def _detect_companies(text: str, aliases: dict[str, str]) -> list[str]:
-        lowered = text.lower()
-        matches = []
-        for alias, canonical in aliases.items():
-            if alias and alias in lowered:
-                matches.append(canonical)
-        seen = []
-        for match in matches:
-            if match not in seen:
-                seen.append(match)
-        return seen[:10]
+    def _detect_companies(text: str, aliases: list[tuple[str, int, str]]) -> tuple[list[str], list[int]]:
+        normalized_text = f" {_normalize_company_text(text)} "
+        mentioned_companies: list[str] = []
+        company_tag_ids: list[int] = []
+        for alias, company_id, mention_value in aliases:
+            if not alias or f" {alias} " not in normalized_text:
+                continue
+            if company_id not in company_tag_ids:
+                if len(company_tag_ids) >= COMPANY_TAG_LIMIT:
+                    continue
+                company_tag_ids.append(company_id)
+            if mention_value not in mentioned_companies:
+                mentioned_companies.append(mention_value)
+        return mentioned_companies, company_tag_ids
 
     def _news_items_for_company(self, company: Company) -> list[NewsItem]:
-        aliases = {company.name}
-        if company.ticker:
-            aliases.add(company.ticker)
-
         rows = self.session.scalars(select(NewsItem).order_by(NewsItem.composite_score.desc())).all()
-        return [item for item in rows if aliases.intersection(set(item.mentioned_companies or []))]
+        return [item for item in rows if company.id in set(item.company_tag_ids or [])]

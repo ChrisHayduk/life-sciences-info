@@ -10,7 +10,14 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_session
-from app.jobs import run_ingest_news, run_poll_sec_filings, run_refresh_market_caps, run_resummarize_item, run_summarize_pending
+from app.jobs import (
+    run_ingest_news,
+    run_poll_sec_filings,
+    run_refresh_market_caps,
+    run_resummarize_item,
+    run_retag_news_companies,
+    run_summarize_pending,
+)
 from app.models import Company, Digest, Filing, NewsItem
 from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
 from app.services.digests import DigestService
@@ -196,6 +203,23 @@ def admin_ingest_news(session: Session = Depends(get_session)) -> AdminActionRes
         message=(
             f"Ingested {result['new_items']} news items, summarized {result['summarized']}, "
             f"{result['remaining_daily_budget']} news summaries remain today."
+        ),
+    )
+
+
+@router.post("/admin/retag-news-companies", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_retag_news_companies(
+    limit: int | None = None,
+    recent_days: int | None = None,
+    focus_tickers: str = "",
+) -> AdminActionResponse:
+    tickers = [ticker.strip().upper() for ticker in focus_tickers.split(",") if ticker.strip()]
+    result = run_retag_news_companies(limit=limit, recent_days=recent_days, focus_tickers=tickers or None)
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Retagged company links for {result['updated']} of {result['scanned']} news items; "
+            f"{result['reranked']} reranked."
         ),
     )
 

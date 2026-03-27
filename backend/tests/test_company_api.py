@@ -37,6 +37,7 @@ def test_company_list_and_detail_include_labels_filings_and_news(client, db_sess
         published_at=datetime(2026, 3, 21, 12, 0, tzinfo=timezone.utc),
         article_hash="hash-1",
         mentioned_companies=["Apex Bio", "ABIO"],
+        company_tag_ids=[company.id],
         topic_tags=["manufacturing"],
         summary_json={"summary": "Plant expansion", "key_takeaways": ["New capacity"], "importance_score": 68},
         importance_score=68,
@@ -60,6 +61,54 @@ def test_company_list_and_detail_include_labels_filings_and_news(client, db_sess
     assert payload["news_count"] == 1
     assert payload["recent_filings"][0]["id"] == filing.id
     assert payload["recent_news"][0]["id"] == news.id
+
+
+def test_company_detail_news_uses_explicit_company_tags_not_freeform_mentions(client, db_session, company):
+    tagged_news = NewsItem(
+        source_name="Fierce Pharma",
+        source_weight=0.95,
+        feed_url="https://example.com/rss",
+        title="Tagged story",
+        canonical_url="https://example.com/tagged-story",
+        excerpt="Tagged story",
+        content_text="Sector update",
+        published_at=datetime(2026, 3, 21, 12, 0, tzinfo=timezone.utc),
+        article_hash="hash-tagged",
+        mentioned_companies=["Sector update"],
+        company_tag_ids=[company.id],
+        topic_tags=["manufacturing"],
+        composite_score=80,
+        importance_score=70,
+        market_cap_score=90,
+        score_explanation={"components": {"importance": 70}, "confidence": "high"},
+    )
+    untagged_news = NewsItem(
+        source_name="Fierce Pharma",
+        source_weight=0.95,
+        feed_url="https://example.com/rss",
+        title="Mention-only story",
+        canonical_url="https://example.com/mention-only-story",
+        excerpt="Mention-only story",
+        content_text="Mention-only story",
+        published_at=datetime(2026, 3, 20, 12, 0, tzinfo=timezone.utc),
+        article_hash="hash-mention-only",
+        mentioned_companies=["Apex Bio", "ABIO"],
+        company_tag_ids=[],
+        topic_tags=["finance"],
+        composite_score=90,
+        importance_score=75,
+        market_cap_score=90,
+        score_explanation={"components": {"importance": 75}, "confidence": "high"},
+    )
+    db_session.add_all([tagged_news, untagged_news])
+    db_session.commit()
+
+    detail_response = client.get(f"/api/v1/companies/{company.id}")
+    payload = detail_response.json()
+
+    assert detail_response.status_code == 200
+    assert payload["news_count"] == 1
+    assert [item["id"] for item in payload["recent_news"]] == [tagged_news.id]
 
 
 def test_company_detail_groups_filings_by_type_priority_and_chronology(client, db_session, company):

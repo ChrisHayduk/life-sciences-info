@@ -63,9 +63,18 @@ def _ensure_compatible_schema() -> None:
         return
 
     type_name = market_cap_column["type"].__class__.__name__.upper()
-    if type_name in {"BIGINTEGER", "BIGINT"}:
-        return
-
-    if engine.dialect.name == "postgresql":
+    if type_name not in {"BIGINTEGER", "BIGINT"} and engine.dialect.name == "postgresql":
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE companies ALTER COLUMN market_cap TYPE BIGINT"))
+
+    inspector = inspect(engine)
+    if not inspector.has_table("news_items"):
+        return
+
+    news_columns = {column["name"] for column in inspector.get_columns("news_items")}
+    if "company_tag_ids" in news_columns:
+        return
+
+    alter_type = "JSON"
+    with engine.begin() as connection:
+        connection.execute(text(f"ALTER TABLE news_items ADD COLUMN company_tag_ids {alter_type}"))

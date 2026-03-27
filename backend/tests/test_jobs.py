@@ -156,3 +156,23 @@ def test_run_refresh_all_data_refreshes_market_caps_before_selecting_companies(m
     assert result["failed_market_caps"] == 0
     assert result["reranked_filings"] == 2
     assert result["reranked_news"] == 1
+
+
+def test_run_retag_news_companies_returns_scan_update_counts(db_session, monkeypatch):
+    class FakeNewsService:
+        def __init__(self, session):
+            self.session = session
+
+        def retag_company_news(self, *, limit=None, recent_days=None, focus_tickers=None):
+            assert limit == 25
+            assert recent_days == 7
+            assert focus_tickers == ["ABIO"]
+            return {"scanned": 12, "updated": 5, "reranked": 12}
+
+    monkeypatch.setattr("app.jobs.init_db", lambda: None)
+    monkeypatch.setattr("app.jobs.SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.jobs.NewsService", FakeNewsService)
+
+    result = jobs.run_retag_news_companies(limit=25, recent_days=7, focus_tickers=["ABIO"])
+
+    assert result == {"scanned": 12, "updated": 5, "reranked": 12}

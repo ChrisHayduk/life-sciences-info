@@ -52,6 +52,7 @@ export type FilingDetail = FilingListItem & {
   prior_comparable_filing_url?: string | null;
   diff_json?: FilingDiff;
   diff_status?: string;
+  related_news?: NewsItem[];
 };
 
 export type Company = {
@@ -82,6 +83,8 @@ export type ClinicalTrial = {
   id: number;
   nct_id: string;
   company_id: number | null;
+  company_name?: string | null;
+  ticker?: string | null;
   title: string;
   phase: string | null;
   status: string;
@@ -113,6 +116,7 @@ export type NewsItem = {
   excerpt?: string | null;
   published_at: string;
   mentioned_companies: string[];
+  company_tag_ids: number[];
   topic_tags: string[];
   importance_score: number;
   market_cap_score: number;
@@ -132,14 +136,15 @@ export type Digest = {
   published_at: string;
   narrative_summary: string;
   payload: {
-    filings?: Array<{ id: number; title: string; company_id: number; score: number }>;
-    news?: Array<{ id: number; title: string; source_name: string; score: number }>;
+    filings?: Array<{ id: number; title: string; company_id: number; company_name?: string; score: number }>;
+    news?: Array<{ id: number; title: string; source_name: string; mentioned_companies?: string[]; company_tag_ids?: number[]; score: number }>;
   };
 };
 
 export type DashboardData = {
   top_filings: FilingListItem[];
   top_news: NewsItem[];
+  recent_trials: ClinicalTrial[];
   latest_digest?: Digest | null;
   counts: Record<string, number>;
 };
@@ -166,6 +171,31 @@ export type NewsFilters = {
   source_name?: string;
   search?: string;
   sort_by?: string;
+};
+
+export type Watchlist = {
+  id: number;
+  name: string;
+  company_ids: number[];
+  form_types: string[];
+  topic_tags: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type WatchlistFeed = {
+  watchlist: Watchlist;
+  filings: FilingListItem[];
+  news: NewsItem[];
+};
+
+export type TrialFilters = {
+  limit?: number;
+  offset?: number;
+  company_id?: number;
+  phase?: string;
+  status?: string;
+  search?: string;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
@@ -208,7 +238,44 @@ export const api = {
       60
     ),
   digests: () => fetchJSON<Digest[]>("/digests", 60),
+  trials: (filters?: TrialFilters) =>
+    fetchJSON<PaginatedResponse<ClinicalTrial>>(
+      `/trials${buildQuery(filters ?? {})}`,
+      60
+    ),
+  watchlists: () => fetchJSON<Watchlist[]>("/watchlists", 0),
+  watchlist: (id: string) => fetchJSON<Watchlist>(`/watchlists/${id}`),
+  watchlistFeed: (id: string, limit?: number) =>
+    fetchJSON<WatchlistFeed>(`/watchlists/${id}/feed${buildQuery({ limit })}`, 0),
 };
+
+export async function createWatchlist(params: {
+  name: string;
+  company_ids?: number[];
+  form_types?: string[];
+  topic_tags?: string[];
+}): Promise<Watchlist> {
+  const query = buildQuery({
+    name: params.name,
+    company_ids: params.company_ids?.join(","),
+    form_types: params.form_types?.join(","),
+    topic_tags: params.topic_tags?.join(","),
+  });
+  const response = await fetch(`${API_BASE}/watchlists${query}`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Failed to create watchlist: ${response.status}`);
+  return response.json() as Promise<Watchlist>;
+}
+
+export async function deleteWatchlist(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/watchlists/${id}`, {
+    method: "DELETE",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Failed to delete watchlist: ${response.status}`);
+}
 
 export function formatCurrency(value?: number | null): string {
   if (!value) {

@@ -2,14 +2,16 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Building2, Newspaper, BookOpen } from "lucide-react";
+import { LayoutDashboard, Building2, Newspaper, FlaskConical, BookOpen, Eye } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/companies", label: "Companies", icon: Building2 },
   { href: "/news", label: "News", icon: Newspaper },
+  { href: "/trials", label: "Trials", icon: FlaskConical },
   { href: "/digests", label: "Digests", icon: BookOpen },
+  { href: "/watchlists", label: "Watchlists", icon: Eye },
 ];
 
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {

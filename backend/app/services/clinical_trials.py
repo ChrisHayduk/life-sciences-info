@@ -7,7 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import ClinicalTrial, Company
@@ -118,6 +118,40 @@ class ClinicalTrialsService:
         sorted_groups = dict(sorted(groups.items(), key=lambda x: PHASE_ORDER.get(x[0], 99)))
         return sorted_groups
 
+    def list_trials_paginated(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        company_id: int | None = None,
+        phase: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        query = select(ClinicalTrial)
+        count_query = select(func.count()).select_from(ClinicalTrial)
+        if company_id:
+            query = query.where(ClinicalTrial.company_id == company_id)
+            count_query = count_query.where(ClinicalTrial.company_id == company_id)
+        if phase:
+            query = query.where(ClinicalTrial.phase == phase)
+            count_query = count_query.where(ClinicalTrial.phase == phase)
+        if status:
+            query = query.where(ClinicalTrial.status == status)
+            count_query = count_query.where(ClinicalTrial.status == status)
+        if search:
+            pattern = f"%{search}%"
+            query = query.where(ClinicalTrial.title.ilike(pattern))
+            count_query = count_query.where(ClinicalTrial.title.ilike(pattern))
+        total = self.session.scalar(count_query) or 0
+        query = query.order_by(ClinicalTrial.last_update_date.desc().nullslast()).offset(offset).limit(limit)
+        trials = self.session.scalars(query).all()
+        return {
+            "items": [self._to_response(t) for t in trials],
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
+
     def _search_studies(self, sponsor_name: str, max_results: int = 50) -> list[dict]:
         """Query the ClinicalTrials.gov v2 API."""
         params = {
@@ -210,12 +244,20 @@ class ClinicalTrialsService:
         self.session.add(trial)
         return "new"
 
-    @staticmethod
-    def _to_response(trial: ClinicalTrial) -> dict[str, Any]:
+    def _to_response(self, trial: ClinicalTrial) -> dict[str, Any]:
+        company_name = None
+        ticker = None
+        if trial.company_id:
+            company = self.session.get(Company, trial.company_id)
+            if company:
+                company_name = company.name
+                ticker = company.ticker
         return {
             "id": trial.id,
             "nct_id": trial.nct_id,
             "company_id": trial.company_id,
+            "company_name": company_name,
+            "ticker": ticker,
             "title": trial.title,
             "phase": trial.phase,
             "status": trial.status,

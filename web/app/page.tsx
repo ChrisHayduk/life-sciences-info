@@ -1,6 +1,9 @@
+import Link from "next/link";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { EmptyPanel, FilingCard, NewsCard, SectionHeader, StatCard } from "@/components/cards";
 import { Markdown } from "@/components/markdown";
-import { api } from "@/lib/api";
+import { api, ClinicalTrial } from "@/lib/api";
 
 export default async function DashboardPage() {
   const data = await api.dashboard().catch(() => null);
@@ -34,10 +37,11 @@ export default async function DashboardPage() {
               life sciences news in a single private dashboard.
             </p>
           </div>
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 lg:grid-cols-2 xl:grid-cols-5">
             <StatCard label="Companies" value={data.counts.companies ?? 0} />
             <StatCard label="Filings" value={data.counts.filings ?? 0} />
             <StatCard label="News Items" value={data.counts.news_items ?? 0} />
+            <StatCard label="Trials" value={data.counts.clinical_trials ?? 0} />
             <StatCard label="Digests" value={data.counts.digests ?? 0} />
           </div>
         </div>
@@ -80,6 +84,58 @@ export default async function DashboardPage() {
           </div>
         </div>
       </section>
+
+      {/* Recent Trial Updates */}
+      {(data.recent_trials ?? []).length > 0 && (
+        <section className="rounded-2xl border border-border/50 bg-card p-7 shadow-lg">
+          <SectionHeader
+            eyebrow="Pipeline"
+            title="Recent trial updates"
+            description="Latest clinical trial activity from ClinicalTrials.gov across tracked companies."
+          />
+          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+            {data.recent_trials.map((trial: ClinicalTrial) => (
+              <Card key={trial.id} className="border-border/50">
+                <CardContent className="p-4 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <a
+                      href={`https://clinicaltrials.gov/study/${trial.nct_id}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs font-mono text-primary underline underline-offset-2 decoration-1 hover:text-primary/80"
+                    >
+                      {trial.nct_id}
+                    </a>
+                    <Badge
+                      variant={
+                        trial.status === "Recruiting" || trial.status === "Active, not recruiting"
+                          ? "default"
+                          : trial.status === "Completed"
+                            ? "secondary"
+                            : "outline"
+                      }
+                      className="text-xs"
+                    >
+                      {trial.status}
+                    </Badge>
+                  </div>
+                  <p className="text-sm font-medium leading-snug line-clamp-2">{trial.title}</p>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {trial.phase && (
+                      <Badge variant="secondary" className="text-xs font-mono">{trial.phase}</Badge>
+                    )}
+                    {trial.company_name && trial.company_id && (
+                      <Link href={`/companies/${trial.company_id}`} className="text-xs text-primary underline underline-offset-2 decoration-1 hover:text-primary/80">
+                        {trial.company_name}{trial.ticker ? ` (${trial.ticker})` : ""}
+                      </Link>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Latest Digest */}
       <section className="rounded-2xl border border-border/50 bg-card p-7 shadow-lg">

@@ -45,16 +45,64 @@ export default async function DigestsPage() {
                     {digest.payload.filings?.length ?? 0} filings and {digest.payload.news?.length ?? 0} news items
                   </p>
                   {(digest.payload.filings ?? []).length > 0 && (
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      {(digest.payload.filings ?? []).slice(0, 3).map((item) => (
-                        <Link
-                          href={`/filings/${item.id}`}
-                          key={item.id}
-                          className="text-xs font-semibold text-primary hover:text-primary/80 underline underline-offset-2 decoration-1"
-                        >
-                          {item.title}
-                        </Link>
-                      ))}
+                    <div className="space-y-1 pt-1">
+                      <span className="text-xs font-medium text-muted-foreground">Top Filings</span>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1">
+                        {(digest.payload.filings ?? []).slice(0, 5).map((item) => (
+                          <span key={item.id} className="text-xs">
+                            <Link
+                              href={`/filings/${item.id}`}
+                              className="font-semibold text-primary hover:text-primary/80 underline underline-offset-2 decoration-1"
+                            >
+                              {item.title}
+                            </Link>
+                            {item.company_name && item.company_id && (
+                              <>
+                                {" · "}
+                                <Link
+                                  href={`/companies/${item.company_id}`}
+                                  className="text-muted-foreground hover:text-primary"
+                                >
+                                  {item.company_name}
+                                </Link>
+                              </>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {(digest.payload.news ?? []).length > 0 && (
+                    <div className="space-y-1 pt-1">
+                      <span className="text-xs font-medium text-muted-foreground">Top News</span>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1">
+                        {(digest.payload.news ?? []).slice(0, 5).map((item) => (
+                          <span key={item.id} className="text-xs">
+                            <span className="font-semibold">{item.title}</span>
+                            <span className="text-muted-foreground"> ({item.source_name})</span>
+                            {(item.mentioned_companies ?? []).length > 0 && (item.company_tag_ids ?? []).length > 0 && (
+                              <>
+                                {" · "}
+                                {item.mentioned_companies!.slice(0, 2).map((name, i) => {
+                                  const cid = item.company_tag_ids?.[i];
+                                  return (
+                                    <span key={`${item.id}-${i}`}>
+                                      {i > 0 && ", "}
+                                      {cid ? (
+                                        <Link href={`/companies/${cid}`} className="text-muted-foreground hover:text-primary">
+                                          {name}
+                                        </Link>
+                                      ) : (
+                                        <span className="text-muted-foreground">{name}</span>
+                                      )}
+                                    </span>
+                                  );
+                                })}
+                              </>
+                            )}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </CardContent>

@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, Download, ExternalLink, FileText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { EmptyPanel, ScorePill } from "@/components/cards";
+import { EmptyPanel, NewsCard, ScorePill } from "@/components/cards";
 import { Markdown } from "@/components/markdown";
 import { CollapsibleSection } from "@/components/collapsible-section";
 import { api, formatDate } from "@/lib/api";
@@ -225,6 +225,22 @@ export default async function FilingDetailPage({ params }: { params: Promise<{ i
           <EmptyPanel title="No parsed sections" body="The original document is still available through the SEC link and PDF export." />
         )}
       </section>
+
+      {/* Related News */}
+      {(filing.related_news ?? []).length > 0 && (
+        <section className="rounded-2xl border border-border/50 bg-card p-7 shadow-lg space-y-4">
+          <div>
+            <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">Cross-Reference</span>
+            <h2 className="text-lg mt-1">Related news coverage</h2>
+            <p className="text-sm text-muted-foreground mt-1">News articles linked to this filing based on event overlap.</p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {filing.related_news!.map((item) => (
+              <NewsCard key={item.id} item={item} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Back link */}
       <Link href="/companies" className="inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:text-primary/80">

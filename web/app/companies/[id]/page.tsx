@@ -3,8 +3,8 @@ import { notFound } from "next/navigation";
 import { ArrowLeft, FileText, TrendingUp, TrendingDown, Minus } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { EmptyPanel, FilingCard, NewsCard, SectionHeader, StatCard } from "@/components/cards";
-import { api, FilingListItem, formatCurrency, formatDate, formatMarketCap } from "@/lib/api";
+import { EmptyPanel, FilingCard, NewsCard, SectionHeader, StatCard, TrialCard } from "@/components/cards";
+import { api, ClinicalTrial, FilingListItem, formatCurrency, formatDate, formatMarketCap } from "@/lib/api";
 
 const FILING_TYPE_LABELS: Record<string, string> = {
   "10-K": "10-K",
@@ -134,47 +134,8 @@ export default async function CompanyDetailPage({ params }: { params: Promise<{ 
                   </span>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
-                  {trials.map((trial) => (
-                    <Card key={trial.id} className="border-border/50">
-                      <CardContent className="p-4 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <a
-                            href={`https://clinicaltrials.gov/study/${trial.nct_id}`}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="text-xs font-mono text-primary underline underline-offset-2 decoration-1 hover:text-primary/80"
-                          >
-                            {trial.nct_id}
-                          </a>
-                          <Badge
-                            variant={
-                              trial.status === "Recruiting" || trial.status === "Active, not recruiting"
-                                ? "default"
-                                : trial.status === "Completed"
-                                  ? "secondary"
-                                  : "outline"
-                            }
-                            className="text-xs"
-                          >
-                            {trial.status}
-                          </Badge>
-                        </div>
-                        <p className="text-sm font-medium leading-snug">{trial.title}</p>
-                        {trial.conditions.length > 0 && (
-                          <div className="flex flex-wrap gap-1">
-                            {trial.conditions.slice(0, 3).map((c) => (
-                              <Badge key={c} variant="outline" className="text-xs font-normal">
-                                {c}
-                              </Badge>
-                            ))}
-                          </div>
-                        )}
-                        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                          {trial.enrollment && <span>{trial.enrollment} enrolled</span>}
-                          {trial.primary_completion_date && <span>Est. completion: {trial.primary_completion_date}</span>}
-                        </div>
-                      </CardContent>
-                    </Card>
+                  {trials.map((trial: ClinicalTrial) => (
+                    <TrialCard key={trial.id} trial={trial} showCompany={false} />
                   ))}
                 </div>
               </div>

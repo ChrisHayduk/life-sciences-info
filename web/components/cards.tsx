@@ -1,11 +1,11 @@
 import Link from "next/link";
 import { ReactNode } from "react";
-import { ExternalLink, FileText, Globe } from "lucide-react";
+import { Building2, ExternalLink, FileText, Globe } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { FilingListItem, NewsItem, formatDate } from "@/lib/api";
+import { ClinicalTrial, FilingListItem, NewsItem, formatDate } from "@/lib/api";
 
 export function SectionHeader({
   eyebrow,
@@ -145,6 +145,26 @@ export function NewsCard({ item }: { item: NewsItem }) {
           <span className="text-xs">{formatDate(item.published_at)}</span>
         </div>
         <h3 className="text-base font-semibold mt-2 leading-snug">{item.title}</h3>
+        {item.mentioned_companies.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {item.mentioned_companies.map((name, i) => {
+              const companyId = item.company_tag_ids?.[i];
+              return companyId ? (
+                <Link key={`${companyId}-${name}`} href={`/companies/${companyId}`}>
+                  <Badge variant="outline" className="text-xs font-normal hover:bg-accent transition-colors cursor-pointer">
+                    <Building2 className="size-3 mr-1" />
+                    {name}
+                  </Badge>
+                </Link>
+              ) : (
+                <Badge key={name} variant="outline" className="text-xs font-normal">
+                  <Building2 className="size-3 mr-1" />
+                  {name}
+                </Badge>
+              );
+            })}
+          </div>
+        )}
       </CardHeader>
       <CardContent className="px-5 pb-5 space-y-3">
         <p className="text-sm leading-relaxed">{item.summary || item.excerpt || "Summary pending."}</p>
@@ -170,6 +190,59 @@ export function NewsCard({ item }: { item: NewsItem }) {
           >
             <ExternalLink className="size-3.5" /> Open article
           </a>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function TrialCard({ trial, showCompany = true }: { trial: ClinicalTrial; showCompany?: boolean }) {
+  return (
+    <Card className="border-border/50">
+      <CardContent className="p-4 space-y-2">
+        <div className="flex items-center justify-between">
+          <a
+            href={`https://clinicaltrials.gov/study/${trial.nct_id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs font-mono text-primary underline underline-offset-2 decoration-1 hover:text-primary/80"
+          >
+            {trial.nct_id}
+          </a>
+          <Badge
+            variant={
+              trial.status === "Recruiting" || trial.status === "Active, not recruiting"
+                ? "default"
+                : trial.status === "Completed"
+                  ? "secondary"
+                  : "outline"
+            }
+            className="text-xs"
+          >
+            {trial.status}
+          </Badge>
+        </div>
+        <p className="text-sm font-medium leading-snug">{trial.title}</p>
+        {trial.conditions.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {trial.conditions.slice(0, 3).map((c) => (
+              <Badge key={c} variant="outline" className="text-xs font-normal">
+                {c}
+              </Badge>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-3 text-xs text-muted-foreground flex-wrap">
+          {trial.phase && (
+            <Badge variant="secondary" className="text-xs font-mono">{trial.phase}</Badge>
+          )}
+          {showCompany && trial.company_name && trial.company_id && (
+            <Link href={`/companies/${trial.company_id}`} className="text-primary underline underline-offset-2 decoration-1 hover:text-primary/80">
+              {trial.company_name}{trial.ticker ? ` (${trial.ticker})` : ""}
+            </Link>
+          )}
+          {trial.enrollment && <span>{trial.enrollment} enrolled</span>}
+          {trial.primary_completion_date && <span>Est. completion: {trial.primary_completion_date}</span>}
         </div>
       </CardContent>
     </Card>

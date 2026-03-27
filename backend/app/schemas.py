@@ -85,6 +85,7 @@ class FilingDetail(FilingListItem):
     prior_comparable_filing_url: str | None = None
     diff_json: dict = Field(default_factory=dict)
     diff_status: str = "pending"
+    related_news: list[NewsItemResponse] = Field(default_factory=list)
 
 
 class NewsItemResponse(BaseModel):
@@ -95,6 +96,7 @@ class NewsItemResponse(BaseModel):
     excerpt: str | None
     published_at: datetime
     mentioned_companies: list[str] = Field(default_factory=list)
+    company_tag_ids: list[int] = Field(default_factory=list)
     topic_tags: list[str] = Field(default_factory=list)
     importance_score: float
     market_cap_score: float
@@ -137,6 +139,7 @@ class DigestResponse(BaseModel):
 class DashboardResponse(BaseModel):
     top_filings: list[FilingListItem] = Field(default_factory=list)
     top_news: list[NewsItemResponse] = Field(default_factory=list)
+    recent_trials: list[dict[str, Any]] = Field(default_factory=list)
     latest_digest: DigestResponse | None = None
     counts: dict[str, int] = Field(default_factory=dict)
 

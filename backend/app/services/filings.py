@@ -14,7 +14,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import Company, Filing
+from app.models import Company, Filing, FilingNewsLink, NewsItem
 from app.schemas import FilingDetail, FilingListItem
 from app.services.constants import ANNUAL_FORMS, FILING_SECTION_PATTERNS, INTERIM_FORMS, TARGET_FORMS
 from app.services.html_pdf import render_html_to_pdf
@@ -913,6 +913,19 @@ class FilingService:
         filing, company = row
         summary = filing.summary_json or {}
         base = self._to_list_item(filing, company)
+
+        # Fetch related news via FilingNewsLink
+        from app.services.news import NewsService
+        related_news_items = self.session.scalars(
+            select(NewsItem)
+            .join(FilingNewsLink, FilingNewsLink.news_item_id == NewsItem.id)
+            .where(FilingNewsLink.filing_id == filing_id)
+            .order_by(FilingNewsLink.confidence.desc())
+            .limit(5)
+        ).all()
+        news_service = NewsService(self.session)
+        related_news = [news_service._to_response(n) for n in related_news_items]
+
         return FilingDetail(
             **base.model_dump(),
             parsed_sections=filing.parsed_sections or {},
@@ -930,6 +943,7 @@ class FilingService:
             ),
             diff_json=filing.diff_json or {},
             diff_status=filing.diff_status or "pending",
+            related_news=related_news,
         )
 
     def _to_list_item(self, filing: Filing, company: Company) -> FilingListItem:

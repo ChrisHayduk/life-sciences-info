@@ -306,6 +306,7 @@ class NewsService:
             excerpt=item.excerpt,
             published_at=item.published_at,
             mentioned_companies=item.mentioned_companies or [],
+            company_tag_ids=item.company_tag_ids or [],
             topic_tags=item.topic_tags or [],
             importance_score=item.importance_score,
             market_cap_score=item.market_cap_score,

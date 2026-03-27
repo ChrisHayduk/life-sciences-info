@@ -18,7 +18,7 @@ from app.jobs import (
     run_retag_news_companies,
     run_summarize_pending,
 )
-from app.models import Company, Digest, Filing, NewsItem, SummaryUsage
+from app.models import ClinicalTrial, Company, Digest, Filing, NewsItem, SummaryUsage
 from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
 from app.services.clinical_trials import ClinicalTrialsService
 from app.services.events import event_stream
@@ -70,15 +70,19 @@ def get_dashboard(session: Session = Depends(get_session)) -> DashboardResponse:
     filing_service = FilingService(session)
     news_service = NewsService(session)
     digest_service = DigestService(session)
+    trials_service = ClinicalTrialsService(session)
     digests = digest_service.list_digests(limit=1)
+    recent_trials = trials_service.list_trials(limit=5)
     return DashboardResponse(
         top_filings=filing_service.list_filings(limit=5, recent_days=365),
         top_news=news_service.list_news(limit=5, recent_days=30),
+        recent_trials=recent_trials,
         latest_digest=digests[0] if digests else None,
         counts={
             "companies": session.scalar(select(func.count()).select_from(Company)) or 0,
             "filings": session.scalar(select(func.count()).select_from(Filing)) or 0,
             "news_items": session.scalar(select(func.count()).select_from(NewsItem)) or 0,
+            "clinical_trials": session.scalar(select(func.count()).select_from(ClinicalTrial)) or 0,
             "digests": session.scalar(select(func.count()).select_from(Digest)) or 0,
         },
     )
@@ -190,11 +194,14 @@ def list_trials(
     company_id: int | None = None,
     phase: str | None = None,
     status: str | None = None,
+    search: str | None = None,
     limit: int = 50,
+    offset: int = 0,
     session: Session = Depends(get_session),
 ):
-    return ClinicalTrialsService(session).list_trials(
-        company_id=company_id, phase=phase, status=status, limit=limit,
+    return ClinicalTrialsService(session).list_trials_paginated(
+        company_id=company_id, phase=phase, status=status,
+        search=search, limit=limit, offset=offset,
     )
 
 

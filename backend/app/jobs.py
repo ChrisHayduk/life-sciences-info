@@ -106,17 +106,62 @@ def run_backfill_top_companies(
     return _with_session(_run)
 
 
-def run_poll_sec_filings() -> int:
-    return _with_session(lambda session: FilingService(session).poll_new_filings())
+def run_poll_sec_filings() -> dict[str, int]:
+    def _run(session):
+        service = FilingService(session)
+        new_filings = service.poll_new_filings()
+        summary_result = service.summarize_pending(limit=service.settings.max_filing_summaries_per_run, automated=True)
+        return {
+            "new_items": new_filings,
+            "summarized": int(summary_result["summarized"]),
+            "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
+        }
+
+    return _with_session(_run)
 
 
-def run_ingest_news() -> int:
-    return _with_session(lambda session: NewsService(session).ingest_feeds())
+def run_ingest_news() -> dict[str, int]:
+    def _run(session):
+        service = NewsService(session)
+        new_items = service.ingest_feeds()
+        summary_result = service.summarize_pending(limit=service.settings.max_news_summaries_per_run, automated=True)
+        return {
+            "new_items": new_items,
+            "summarized": int(summary_result["summarized"]),
+            "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
+        }
+
+    return _with_session(_run)
 
 
 def run_build_weekly_digest() -> int:
     digest = _with_session(lambda session: DigestService(session).build_weekly_digest())
     return digest.id
+
+
+def run_summarize_pending(
+    kind: str,
+    *,
+    limit: int | None = None,
+    include_historical: bool = False,
+    automated: bool = False,
+) -> dict[str, int]:
+    def _run(session):
+        if kind == "filing":
+            return FilingService(session).summarize_pending(
+                limit=limit,
+                automated=automated,
+                include_historical=include_historical,
+            )
+        if kind == "news":
+            return NewsService(session).summarize_pending(limit=limit, automated=automated)
+        raise ValueError("kind must be 'filing' or 'news'")
+
+    result = _with_session(_run)
+    return {
+        "summarized": int(result["summarized"]),
+        "remaining_daily_budget": int(result["remaining_daily_budget"]),
+    }
 
 
 def run_resummarize_item(kind: str, item_id: int) -> int:
@@ -126,17 +171,8 @@ def run_resummarize_item(kind: str, item_id: int) -> int:
             filing = session.get(FilingModel, item_id)
             if not filing:
                 raise ValueError(f"Unknown filing id={item_id}")
-            company = filing.company
-            summary = filing_service.summarizer.summarize(
-                kind="filing",
-                title=filing.title or f"{company.name} {filing.form_type}",
-                text=filing_service._summary_source_text(filing),
-                company_name=company.name,
-                evidence_sections=list((filing.parsed_sections or {}).keys()),
-            )
-            filing.summary_json = summary.model_dump()
-            filing.summary_status = "complete"
-            filing.summary_attempts += 1
+            prior = filing_service._prior_comparable_filing(filing.company_id, filing)
+            filing_service._apply_summary(filing, filing.company, prior_filing=prior, trigger="manual")
             session.commit()
             return item_id
 
@@ -147,16 +183,9 @@ def run_resummarize_item(kind: str, item_id: int) -> int:
         news_item = session.get(NewsItemModel, item_id)
         if not news_item:
             raise ValueError(f"Unknown news id={item_id}")
-        summary = news_service.summarizer.summarize(
-            kind="news",
-            title=news_item.title,
-            text=news_item.content_text or news_item.excerpt or news_item.title,
-            company_name=", ".join(news_item.mentioned_companies),
-            evidence_sections=news_item.topic_tags,
-        )
-        news_item.summary_json = summary.model_dump()
-        news_item.summary_status = "complete"
-        news_item.summary_attempts += 1
+        news_service._apply_summary(news_item, trigger="manual")
+        companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        news_service._apply_scores(news_item, companies)
         session.commit()
         return item_id
 
@@ -223,7 +252,7 @@ def run_refresh_all_data(
     for index, company in enumerate(selected, start=1):
         def _refresh_company(session):
             filing_service = FilingService(session)
-            reprocessed = filing_service.reprocess_company_filings(company["id"])
+            reprocessed = filing_service.reprocess_company_filings(company["id"], resummarize=False)
             added = filing_service.backfill_company(
                 company["id"],
                 max_filings=max_filings,
@@ -247,8 +276,14 @@ def run_refresh_all_data(
 
     news_count = 0
     if include_news:
-        news_count = _with_session(lambda session: NewsService(session).ingest_feeds())
-        print(f"News ingestion complete: {news_count} items", flush=True)
+        news_result = run_ingest_news()
+        news_count = int(news_result["new_items"])
+        print(
+            f"News ingestion complete: {news_count} items, "
+            f"{news_result['summarized']} summarized, "
+            f"{news_result['remaining_daily_budget']} daily budget remaining",
+            flush=True,
+        )
 
     digest_count = 0
     if build_digest:
@@ -311,6 +346,14 @@ def main() -> None:
     subparsers.add_parser("poll-sec-filings", help="Poll covered companies for newly filed periodic reports.")
     subparsers.add_parser("ingest-news", help="Pull configured news feeds and summarize new items.")
     subparsers.add_parser("build-weekly-digest", help="Build the current weekly digest.")
+
+    summarize_pending_parser = subparsers.add_parser(
+        "summarize-pending",
+        help="Summarize pending filings or news with quota-aware ranking.",
+    )
+    summarize_pending_parser.add_argument("kind", choices=["filing", "news"])
+    summarize_pending_parser.add_argument("--limit", type=int, default=None)
+    summarize_pending_parser.add_argument("--include-historical", action="store_true")
 
     resummarize_parser = subparsers.add_parser("resummarize", help="Re-summarize a filing or news item.")
     resummarize_parser.add_argument("kind", choices=["filing", "news"])
@@ -389,12 +432,35 @@ def main() -> None:
         print(f"Backfilled {count} filings across the selected company set", flush=True)
         return
     if args.command == "poll-sec-filings":
-        count = run_poll_sec_filings()
-        print(f"Discovered {count} new filings", flush=True)
+        result = run_poll_sec_filings()
+        print(
+            f"Discovered {result['new_items']} new filings, "
+            f"summarized {result['summarized']}, "
+            f"{result['remaining_daily_budget']} daily budget remaining",
+            flush=True,
+        )
         return
     if args.command == "ingest-news":
-        count = run_ingest_news()
-        print(f"Ingested {count} news items", flush=True)
+        result = run_ingest_news()
+        print(
+            f"Ingested {result['new_items']} news items, "
+            f"summarized {result['summarized']}, "
+            f"{result['remaining_daily_budget']} daily budget remaining",
+            flush=True,
+        )
+        return
+    if args.command == "summarize-pending":
+        result = run_summarize_pending(
+            args.kind,
+            limit=args.limit,
+            include_historical=args.include_historical,
+            automated=False,
+        )
+        print(
+            f"Summarized {result['summarized']} pending {args.kind} items; "
+            f"{result['remaining_daily_budget']} daily budget remaining",
+            flush=True,
+        )
         return
     if args.command == "build-weekly-digest":
         digest_id = run_build_weekly_digest()

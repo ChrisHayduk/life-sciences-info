@@ -76,6 +76,28 @@ class FakeSECClient:
             "original_document_url": f"https://example.com/{accession_number}/{primary_document}",
         }
 
+    def get_company_submissions(self, cik: str):
+        rows = self.iter_company_filings(cik)
+        return {
+            "filings": {
+                "recent": {
+                    "accessionNumber": [row["accessionNumber"] for row in rows],
+                    "form": [row["form"] for row in rows],
+                    "filingDate": [row["filingDate"] for row in rows],
+                    "reportDate": [row.get("reportDate") for row in rows],
+                    "primaryDocument": [row.get("primaryDocument") for row in rows],
+                    "primaryDocDescription": [row.get("primaryDocDescription") for row in rows],
+                    "items": [row.get("items") for row in rows],
+                }
+            }
+        }
+
+    @staticmethod
+    def _rows_from_columnar(payload):
+        keys = list(payload.keys())
+        row_count = len(payload[keys[0]]) if keys else 0
+        return [{key: payload[key][index] for key in keys} for index in range(row_count)]
+
     def download_primary_document(self, cik: str, accession_number: str, primary_document: str | None):
         html = f"""
         <html><body>
@@ -222,6 +244,8 @@ def test_backfill_loads_target_forms_and_dedupes_on_rerun(db_session, company, t
     assert pdf_bytes.startswith(b"%PDF")
     assert b"Risk Factors" in pdf_bytes
     assert b"mrk:NoiseMember" not in pdf_bytes
+    assert all(filing.summary_status == "pending" for filing in filings)
+    assert all(filing.summary_attempts == 0 for filing in filings)
 
 
 def test_backfill_prefers_browser_rendered_html_pdf_when_available(db_session, company, tmp_path, monkeypatch):
@@ -268,3 +292,47 @@ def test_backfill_company_can_limit_by_years_back(db_session, company, tmp_path,
 
     assert created == 3
     assert all(filing.filed_at.year >= 2023 for filing in filings)
+
+
+def test_automated_filing_summarization_skips_historical_backfill_items(db_session, company, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    service = FilingService(
+        db_session,
+        sec_client=FakeSECClient(),
+        summarizer=StubSummarizer(),
+        market_data_client=StubMarketData(),
+        object_store=ObjectStore(),
+    )
+
+    service.backfill_company(company.id)
+    result = service.summarize_pending(limit=5, automated=True)
+
+    filings = db_session.query(Filing).all()
+    assert result["summarized"] == 0
+    assert all(filing.summary_status == "pending" for filing in filings)
+
+
+def test_automated_filing_summarization_processes_polled_items_with_limit(db_session, company, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("FILING_SUMMARY_BACKLOG_DAYS", "2000")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    service = FilingService(
+        db_session,
+        sec_client=FakeSECClient(),
+        summarizer=StubSummarizer(),
+        market_data_client=StubMarketData(),
+        object_store=ObjectStore(),
+    )
+
+    created = service.poll_new_filings()
+    result = service.summarize_pending(limit=1, automated=True)
+
+    complete_count = db_session.query(Filing).filter(Filing.summary_status == "complete").count()
+    assert created == 3
+    assert result["summarized"] == 1
+    assert complete_count == 1

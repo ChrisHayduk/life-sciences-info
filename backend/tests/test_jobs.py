@@ -54,7 +54,7 @@ def test_run_refresh_all_data_refreshes_market_caps_before_selecting_companies(m
         def __init__(self, session):
             self.session = session
 
-        def reprocess_company_filings(self, company_id):
+        def reprocess_company_filings(self, company_id, resummarize=True):
             events.append(f"reprocess:{company_id}")
             return 2
 

@@ -20,9 +20,10 @@ from app.services.constants import ANNUAL_FORMS, FILING_SECTION_PATTERNS, INTERI
 from app.services.html_pdf import render_html_to_pdf
 from app.services.market_data import MarketDataClient
 from app.services.pdf import build_pdf_from_text
-from app.services.ranking import company_market_cap_percentiles, compute_filing_scores
+from app.services.ranking import company_market_cap_percentiles, compute_filing_scores, compute_pending_filing_scores
 from app.services.sec import SECClient
 from app.services.storage import ObjectStore
+from app.services.summary_budget import SummaryBudgetService
 from app.services.summarization import OpenAISummarizer
 
 INLINE_XBRL_TAGS = {"ix:nonnumeric", "ix:nonfraction", "ix:continuation", "ix:footnote"}
@@ -419,7 +420,7 @@ class FilingService:
             target_rows = target_rows[:max_filings]
         for filing_row in target_rows:
             try:
-                created += int(self._ingest_filing_row(company, filing_row))
+                created += int(self._ingest_filing_row(company, filing_row, ingest_origin="historical_backfill"))
             except Exception:
                 continue
         self.session.commit()
@@ -433,13 +434,13 @@ class FilingService:
             recent_rows = self.sec_client._rows_from_columnar(submissions.get("filings", {}).get("recent", {}))
             for filing_row in recent_rows:
                 try:
-                    created += int(self._ingest_filing_row(company, filing_row))
+                    created += int(self._ingest_filing_row(company, filing_row, ingest_origin="sec_poll"))
                 except Exception:
                     continue
         self.session.commit()
         return created
 
-    def reprocess_company_filings(self, company_id: int, limit: int | None = None) -> int:
+    def reprocess_company_filings(self, company_id: int, limit: int | None = None, *, resummarize: bool = True) -> int:
         company = self.session.get(Company, company_id)
         if not company:
             raise ValueError(f"Unknown company id={company_id}")
@@ -449,11 +450,11 @@ class FilingService:
         ).all()
         updated = 0
         for filing_id in filing_ids[: limit or None]:
-            updated += int(self.reprocess_existing_filing(filing_id, commit=True))
+            updated += int(self.reprocess_existing_filing(filing_id, commit=True, resummarize=resummarize))
             self.session.expunge_all()
         return updated
 
-    def reprocess_existing_filing(self, filing_id: int, *, commit: bool = True) -> bool:
+    def reprocess_existing_filing(self, filing_id: int, *, commit: bool = True, resummarize: bool = True) -> bool:
         filing = self.session.get(Filing, filing_id)
         if not filing:
             raise ValueError(f"Unknown filing id={filing_id}")
@@ -479,40 +480,20 @@ class FilingService:
         filing.pdf_artifact_key = pdf_key
         filing.extra_metadata = {**(filing.extra_metadata or {}), "pdf_source": pdf_source}
 
-        summary = self.summarizer.summarize(
-            kind="filing",
-            title=filing.title or f"{company.name} {filing.form_type}",
-            text=self._summary_source_text(filing),
-            company_name=company.name,
-            evidence_sections=list(parsed_sections.keys()),
-        )
-        filing.summary_json = summary.model_dump()
-        filing.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
-        filing.summary_prompt_version = self.settings.summary_prompt_version
-        filing.summary_status = "complete"
-        filing.summary_attempts += 1
-
         prior = self._prior_comparable_filing(company.id, filing)
         filing.prior_comparable_filing_id = prior.id if prior else None
-        market_cap_scores = company_market_cap_percentiles(self.session)
-        scores = compute_filing_scores(
-            filing,
-            company_market_cap_score=market_cap_scores.get(company.id, 0.0),
-            has_market_cap=company.market_cap is not None,
-            prior_filing=prior,
-        )
-        filing.market_cap_score = float(scores["market_cap_score"])
-        filing.importance_score = float(scores["importance_score"])
-        filing.impact_score = float(scores["impact_score"])
-        filing.composite_score = float(scores["composite_score"])
-        filing.score_confidence = str(scores["score_confidence"])
-        filing.score_explanation = dict(scores["score_explanation"])
+        if resummarize:
+            self._apply_summary(filing, company, prior_filing=prior, trigger="manual")
+        else:
+            if not filing.summary_json:
+                filing.summary_status = "pending"
+            self._apply_scores(filing, company, prior_filing=prior)
 
         if commit:
             self.session.commit()
         return True
 
-    def _ingest_filing_row(self, company: Company, filing_row: dict[str, Any]) -> bool:
+    def _ingest_filing_row(self, company: Company, filing_row: dict[str, Any], *, ingest_origin: str) -> bool:
         form_type = (filing_row.get("form") or "").upper()
         if not is_target_form(form_type):
             return False
@@ -571,6 +552,7 @@ class FilingService:
                 "size": filing_row.get("size"),
                 "filmNumber": filing_row.get("filmNumber"),
                 "pdf_source": pdf_source,
+                "ingest_origin": ingest_origin,
             },
         )
         self.session.add(filing)
@@ -580,34 +562,61 @@ class FilingService:
         prior = self._prior_comparable_filing(company.id, filing)
         if prior:
             filing.prior_comparable_filing_id = prior.id
-
-        summary = self.summarizer.summarize(
-            kind="filing",
-            title=filing.title or f"{company.name} {form_type}",
-            text=self._summary_source_text(filing),
-            company_name=company.name,
-            evidence_sections=list(parsed_sections.keys()),
-        )
-        filing.summary_json = summary.model_dump()
-        filing.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
-        filing.summary_prompt_version = self.settings.summary_prompt_version
-        filing.summary_status = "complete"
-        filing.summary_attempts += 1
-
-        market_cap_scores = company_market_cap_percentiles(self.session)
-        scores = compute_filing_scores(
-            filing,
-            company_market_cap_score=market_cap_scores.get(company.id, 0.0),
-            has_market_cap=company.market_cap is not None,
-            prior_filing=prior,
-        )
-        filing.market_cap_score = float(scores["market_cap_score"])
-        filing.importance_score = float(scores["importance_score"])
-        filing.impact_score = float(scores["impact_score"])
-        filing.composite_score = float(scores["composite_score"])
-        filing.score_confidence = str(scores["score_confidence"])
-        filing.score_explanation = dict(scores["score_explanation"])
+        filing.summary_status = "pending"
+        self._apply_scores(filing, company, prior_filing=prior)
         return True
+
+    def summarize_pending(
+        self,
+        *,
+        limit: int | None = None,
+        automated: bool = True,
+        include_historical: bool = False,
+    ) -> dict[str, int]:
+        budget_service = SummaryBudgetService(self.session)
+        remaining_daily = budget_service.remaining("filing") if automated and self.settings.openai_api_key else max(limit or 0, self.settings.max_filing_summaries_per_run)
+        if automated and self.settings.openai_api_key:
+            effective_limit = min(limit or self.settings.max_filing_summaries_per_run, self.settings.max_filing_summaries_per_run, remaining_daily)
+        else:
+            effective_limit = limit or self.settings.max_filing_summaries_per_run
+
+        if effective_limit <= 0:
+            return {"summarized": 0, "remaining_daily_budget": remaining_daily}
+
+        candidates = self.session.execute(
+            select(Filing, Company)
+            .join(Company, Filing.company_id == Company.id)
+            .where(Filing.summary_status.in_(["pending", "failed"]), Filing.summary_attempts < 3)
+            .order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
+        ).all()
+
+        cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
+        summarized = 0
+        for filing, company in candidates:
+            ingest_origin = (filing.extra_metadata or {}).get("ingest_origin")
+            if automated and not include_historical and ingest_origin != "sec_poll":
+                continue
+            filed_at = filing.filed_at
+            if filed_at.tzinfo is None:
+                filed_at = filed_at.replace(tzinfo=UTC)
+            if automated and filed_at < cutoff:
+                continue
+            prior = self._prior_comparable_filing(company.id, filing)
+            try:
+                self._apply_summary(filing, company, prior_filing=prior, trigger="auto" if automated else "manual")
+            except Exception:
+                filing.summary_status = "failed"
+                filing.summary_attempts += 1
+                continue
+            summarized += 1
+            if summarized >= effective_limit:
+                break
+
+        if automated and self.settings.openai_api_key:
+            budget_service.record("filing", summarized)
+        self.session.commit()
+        remaining = budget_service.remaining("filing") if self.settings.openai_api_key else 0
+        return {"summarized": summarized, "remaining_daily_budget": remaining}
 
     def _store_filing_artifacts(
         self,
@@ -668,6 +677,44 @@ class FilingService:
         company.market_cap = market["market_cap"]
         company.market_cap_source = market["source"]
         company.market_cap_updated_at = market["as_of"]
+
+    def _apply_summary(self, filing: Filing, company: Company, *, prior_filing: Filing | None, trigger: str) -> None:
+        summary = self.summarizer.summarize(
+            kind="filing",
+            title=filing.title or f"{company.name} {filing.form_type}",
+            text=self._summary_source_text(filing),
+            company_name=company.name,
+            evidence_sections=list((filing.parsed_sections or {}).keys()),
+        )
+        filing.summary_json = summary.model_dump()
+        filing.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
+        filing.summary_prompt_version = self.settings.summary_prompt_version
+        filing.summary_status = "complete"
+        filing.summary_attempts += 1
+        filing.extra_metadata = {**(filing.extra_metadata or {}), "summary_trigger": trigger}
+        self._apply_scores(filing, company, prior_filing=prior_filing)
+
+    def _apply_scores(self, filing: Filing, company: Company, *, prior_filing: Filing | None) -> None:
+        market_cap_scores = company_market_cap_percentiles(self.session)
+        if filing.summary_status == "complete":
+            scores = compute_filing_scores(
+                filing,
+                company_market_cap_score=market_cap_scores.get(company.id, 0.0),
+                has_market_cap=company.market_cap is not None,
+                prior_filing=prior_filing,
+            )
+        else:
+            scores = compute_pending_filing_scores(
+                filing,
+                company_market_cap_score=market_cap_scores.get(company.id, 0.0),
+                has_market_cap=company.market_cap is not None,
+            )
+        filing.market_cap_score = float(scores["market_cap_score"])
+        filing.importance_score = float(scores["importance_score"])
+        filing.impact_score = float(scores["impact_score"])
+        filing.composite_score = float(scores["composite_score"])
+        filing.score_confidence = str(scores["score_confidence"])
+        filing.score_explanation = dict(scores["score_explanation"])
 
     def _prior_comparable_filing(self, company_id: int, filing: Filing) -> Filing | None:
         group = comparable_group(filing.normalized_form_type)
@@ -768,6 +815,7 @@ class FilingService:
             impact_score=filing.impact_score,
             composite_score=filing.composite_score,
             score_explanation=filing.score_explanation or {},
+            summary_status=filing.summary_status,
             summary=summary.get("summary", ""),
             original_document_url=filing.original_document_url,
             pdf_download_url=(

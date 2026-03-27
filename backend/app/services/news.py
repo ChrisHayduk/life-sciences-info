@@ -18,7 +18,8 @@ from app.config import get_settings
 from app.models import Company, NewsItem
 from app.schemas import NewsItemResponse
 from app.services.constants import NEWS_FEEDS
-from app.services.ranking import company_market_cap_percentiles, compute_news_scores
+from app.services.ranking import company_market_cap_percentiles, compute_news_scores, compute_pending_news_scores
+from app.services.summary_budget import SummaryBudgetService
 from app.services.summarization import OpenAISummarizer
 
 
@@ -62,7 +63,6 @@ class NewsService:
     def ingest_feeds(self) -> int:
         companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
         company_aliases = self._company_aliases(companies)
-        market_caps = company_market_cap_percentiles(self.session)
         inserted = 0
 
         for feed in NEWS_FEEDS:
@@ -99,35 +99,55 @@ class NewsService:
                 )
                 self.session.add(news_item)
                 self.session.flush()
-
-                summary = self.summarizer.summarize(
-                    kind="news",
-                    title=title,
-                    text=article_text,
-                    company_name=", ".join(mentioned) if mentioned else None,
-                    evidence_sections=topic_tags,
-                )
-                news_item.summary_json = summary.model_dump()
-                news_item.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
-                news_item.summary_prompt_version = self.settings.summary_prompt_version
-                news_item.summary_status = "complete"
-                news_item.summary_attempts += 1
-
-                company_scores = [
-                    market_caps.get(company.id, 0.0)
-                    for company in companies
-                    if company.name in mentioned or (company.ticker and company.ticker in mentioned)
-                ]
-                market_score = max(company_scores) if company_scores else 0.0
-                scores = compute_news_scores(news_item, company_market_cap_score=market_score)
-                news_item.importance_score = float(scores["importance_score"])
-                news_item.market_cap_score = float(scores["market_cap_score"])
-                news_item.composite_score = float(scores["composite_score"])
-                news_item.score_explanation = dict(scores["score_explanation"])
+                news_item.summary_status = "pending"
+                self._apply_scores(news_item, companies)
                 inserted += 1
 
         self.session.commit()
         return inserted
+
+    def summarize_pending(self, *, limit: int | None = None, automated: bool = True) -> dict[str, int]:
+        budget_service = SummaryBudgetService(self.session)
+        remaining_daily = budget_service.remaining("news") if automated and self.settings.openai_api_key else max(limit or 0, self.settings.max_news_summaries_per_run)
+        if automated and self.settings.openai_api_key:
+            effective_limit = min(limit or self.settings.max_news_summaries_per_run, self.settings.max_news_summaries_per_run, remaining_daily)
+        else:
+            effective_limit = limit or self.settings.max_news_summaries_per_run
+
+        if effective_limit <= 0:
+            return {"summarized": 0, "remaining_daily_budget": remaining_daily}
+
+        companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.settings.news_summary_backlog_days)
+        candidates = self.session.scalars(
+            select(NewsItem)
+            .where(NewsItem.summary_status.in_(["pending", "failed"]), NewsItem.summary_attempts < 3)
+            .order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc())
+        ).all()
+
+        summarized = 0
+        for news_item in candidates:
+            published_at = news_item.published_at
+            if published_at.tzinfo is None:
+                published_at = published_at.replace(tzinfo=timezone.utc)
+            if automated and published_at < cutoff:
+                continue
+            try:
+                self._apply_summary(news_item, trigger="auto" if automated else "manual")
+                self._apply_scores(news_item, companies)
+            except Exception:
+                news_item.summary_status = "failed"
+                news_item.summary_attempts += 1
+                continue
+            summarized += 1
+            if summarized >= effective_limit:
+                break
+
+        if automated and self.settings.openai_api_key:
+            budget_service.record("news", summarized)
+        self.session.commit()
+        remaining = budget_service.remaining("news") if self.settings.openai_api_key else 0
+        return {"summarized": summarized, "remaining_daily_budget": remaining}
 
     def list_news(self, limit: int = 50, recent_days: int | None = None) -> list[NewsItemResponse]:
         query = select(NewsItem).order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc())
@@ -159,9 +179,42 @@ class NewsService:
             market_cap_score=item.market_cap_score,
             composite_score=item.composite_score,
             score_explanation=item.score_explanation or {},
+            summary_status=item.summary_status,
             summary=summary.get("summary", ""),
             key_takeaways=summary.get("key_takeaways", []),
         )
+
+    def _apply_summary(self, news_item: NewsItem, *, trigger: str) -> None:
+        summary = self.summarizer.summarize(
+            kind="news",
+            title=news_item.title,
+            text=news_item.content_text or news_item.excerpt or news_item.title,
+            company_name=", ".join(news_item.mentioned_companies) if news_item.mentioned_companies else None,
+            evidence_sections=news_item.topic_tags or [],
+        )
+        news_item.summary_json = summary.model_dump()
+        news_item.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
+        news_item.summary_prompt_version = self.settings.summary_prompt_version
+        news_item.summary_status = "complete"
+        news_item.summary_attempts += 1
+        news_item.extra_metadata = {**(news_item.extra_metadata or {}), "summary_trigger": trigger}
+
+    def _apply_scores(self, news_item: NewsItem, companies: list[Company]) -> None:
+        market_caps = company_market_cap_percentiles(self.session)
+        company_scores = [
+            market_caps.get(company.id, 0.0)
+            for company in companies
+            if company.name in news_item.mentioned_companies or (company.ticker and company.ticker in news_item.mentioned_companies)
+        ]
+        market_score = max(company_scores) if company_scores else 0.0
+        if news_item.summary_status == "complete":
+            scores = compute_news_scores(news_item, company_market_cap_score=market_score)
+        else:
+            scores = compute_pending_news_scores(news_item, company_market_cap_score=market_score)
+        news_item.importance_score = float(scores["importance_score"])
+        news_item.market_cap_score = float(scores["market_cap_score"])
+        news_item.composite_score = float(scores["composite_score"])
+        news_item.score_explanation = dict(scores["score_explanation"])
 
     def _fetch_article_text(self, url: str) -> str:
         if not url:

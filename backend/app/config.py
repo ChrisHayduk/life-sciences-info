@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     enable_scheduler: bool = False
     enable_browser_pdf_rendering: bool = True
     browser_pdf_timeout_seconds: float = 45.0
+    max_filing_summaries_per_day: int = 12
+    max_news_summaries_per_day: int = 24
+    max_filing_summaries_per_run: int = 3
+    max_news_summaries_per_run: int = 8
+    news_summary_backlog_days: int = 3
+    filing_summary_backlog_days: int = 14
     timezone: str = "America/New_York"
     digest_weekday: str = "mon"
     digest_hour: int = 8

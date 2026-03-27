@@ -23,6 +23,14 @@ MATERIAL_EVENT_KEYWORDS = {
     "commercial launch": 0.8,
 }
 
+FILING_FORM_BASE_SCORES = {
+    "10-K": 95.0,
+    "20-F": 95.0,
+    "40-F": 95.0,
+    "10-Q": 85.0,
+    "6-K": 65.0,
+}
+
 
 def company_market_cap_percentiles(session: Session) -> dict[int, float]:
     companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
@@ -169,5 +177,75 @@ def compute_news_scores(
                 "Weights renormalize when no covered company is mentioned.",
             ],
             "confidence": "high" if news_item.mentioned_companies else "medium",
+        },
+    }
+
+
+def compute_pending_filing_scores(
+    filing: Filing,
+    *,
+    company_market_cap_score: float,
+    has_market_cap: bool = True,
+    now: datetime | None = None,
+) -> dict[str, float | str | dict]:
+    form_score = FILING_FORM_BASE_SCORES.get(filing.normalized_form_type, 55.0)
+    material = material_event_score(filing.raw_text)
+    recency = recency_score(filing.filed_at, now=now)
+    importance = round((0.60 * form_score) + (0.40 * material), 2)
+    impact = round((0.35 * form_score) + (0.30 * material) + (0.35 * recency), 2)
+    composite = round((0.35 * company_market_cap_score) + (0.40 * impact) + (0.25 * recency), 2)
+    confidence = "high" if has_market_cap else "degraded"
+    return {
+        "market_cap_score": round(company_market_cap_score, 2),
+        "importance_score": importance,
+        "impact_score": impact,
+        "composite_score": composite,
+        "score_confidence": confidence,
+        "score_explanation": {
+            "components": {
+                "market_cap": round(company_market_cap_score, 2),
+                "form_weight": round(form_score, 2),
+                "material_events": round(material, 2),
+                "recency": round(recency, 2),
+            },
+            "rationale": [
+                "Pending summary rank uses market cap, filing form weight, material keywords, and recency.",
+            ],
+            "confidence": confidence,
+        },
+    }
+
+
+def compute_pending_news_scores(
+    news_item: NewsItem,
+    *,
+    company_market_cap_score: float,
+    now: datetime | None = None,
+) -> dict[str, float | dict]:
+    keyword_signal = material_event_score(f"{news_item.title or ''} {news_item.content_text or news_item.excerpt or ''}")
+    recency = recency_score(news_item.published_at, now=now)
+    importance = round((0.55 * keyword_signal) + (0.45 * (news_item.source_weight * 100.0)), 2)
+    composite = round(
+        (0.30 * importance)
+        + (0.25 * (news_item.source_weight * 100.0))
+        + (0.20 * company_market_cap_score)
+        + (0.25 * recency),
+        2,
+    )
+    return {
+        "importance_score": importance,
+        "market_cap_score": round(company_market_cap_score, 2),
+        "composite_score": composite,
+        "score_explanation": {
+            "components": {
+                "keyword_signal": round(keyword_signal, 2),
+                "source_weight": round(news_item.source_weight * 100.0, 2),
+                "market_cap_weight": round(company_market_cap_score, 2),
+                "recency": round(recency, 2),
+            },
+            "rationale": [
+                "Pending news rank uses source weight, keyword signal, company market cap, and recency.",
+            ],
+            "confidence": "medium",
         },
     }

@@ -123,3 +123,15 @@ class Digest(Base, TimestampMixin):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     narrative_summary: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class SummaryUsage(Base, TimestampMixin):
+    __tablename__ = "summary_usage"
+    __table_args__ = (
+        UniqueConstraint("usage_date", "kind", name="uq_summary_usage_date_kind"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    usage_date: Mapped[date] = mapped_column(Date, index=True)
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    count: Mapped[int] = mapped_column(Integer, default=0)

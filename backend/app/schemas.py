@@ -59,6 +59,7 @@ class FilingListItem(BaseModel):
     impact_score: float
     composite_score: float
     score_explanation: dict[str, Any] = Field(default_factory=dict)
+    summary_status: str = "pending"
     summary: str = ""
     original_document_url: str
     pdf_download_url: str | None = None
@@ -88,6 +89,7 @@ class NewsItemResponse(BaseModel):
     market_cap_score: float
     composite_score: float
     score_explanation: dict[str, Any] = Field(default_factory=dict)
+    summary_status: str = "pending"
     summary: str = ""
     key_takeaways: list[str] = Field(default_factory=list)
 

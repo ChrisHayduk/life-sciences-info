@@ -25,6 +25,18 @@ services:
         value: "true"
       - key: ENABLE_BROWSER_PDF_RENDERING
         value: "true"
+      - key: MAX_FILING_SUMMARIES_PER_DAY
+        value: "12"
+      - key: MAX_NEWS_SUMMARIES_PER_DAY
+        value: "24"
+      - key: MAX_FILING_SUMMARIES_PER_RUN
+        value: "3"
+      - key: MAX_NEWS_SUMMARIES_PER_RUN
+        value: "8"
+      - key: FILING_SUMMARY_BACKLOG_DAYS
+        value: "14"
+      - key: NEWS_SUMMARY_BACKLOG_DAYS
+        value: "3"
       - key: SEC_USER_AGENT
         sync: false
       - key: OPENAI_API_KEY

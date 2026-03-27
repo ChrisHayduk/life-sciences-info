@@ -12,7 +12,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.models import Company, Digest, Filing, NewsItem
 from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
-from app.jobs import run_resummarize_item
+from app.jobs import run_ingest_news, run_poll_sec_filings, run_resummarize_item, run_summarize_pending
 from app.services.digests import DigestService
 from app.services.filings import FilingService
 from app.services.market_caps import MarketCapService
@@ -179,14 +179,40 @@ def admin_refresh_market_caps(count: int | None = None, session: Session = Depen
 
 @router.post("/admin/poll-filings", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
 def admin_poll_filings(session: Session = Depends(get_session)) -> AdminActionResponse:
-    count = FilingService(session).poll_new_filings()
-    return AdminActionResponse(status="ok", message=f"Discovered {count} new filings.")
+    result = run_poll_sec_filings()
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Discovered {result['new_items']} new filings, summarized {result['summarized']}, "
+            f"{result['remaining_daily_budget']} filing summaries remain today."
+        ),
+    )
 
 
 @router.post("/admin/ingest-news", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
 def admin_ingest_news(session: Session = Depends(get_session)) -> AdminActionResponse:
-    count = NewsService(session).ingest_feeds()
-    return AdminActionResponse(status="ok", message=f"Ingested {count} news items.")
+    result = run_ingest_news()
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Ingested {result['new_items']} news items, summarized {result['summarized']}, "
+            f"{result['remaining_daily_budget']} news summaries remain today."
+        ),
+    )
+
+
+@router.post("/admin/summarize-pending/{kind}", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_summarize_pending(kind: str, limit: int | None = None, include_historical: bool = False) -> AdminActionResponse:
+    if kind not in {"filing", "news"}:
+        raise HTTPException(status_code=400, detail="kind must be 'filing' or 'news'")
+    result = run_summarize_pending(kind, limit=limit, include_historical=include_historical, automated=False)
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Summarized {result['summarized']} pending {kind} items; "
+            f"{result['remaining_daily_budget']} daily budget remains."
+        ),
+    )
 
 
 @router.post("/admin/build-weekly-digest", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])

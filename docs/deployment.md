@@ -47,6 +47,8 @@ Set these required environment variables during Blueprint creation:
 - `OPENAI_API_KEY`
 - `MARKET_DATA_PROVIDER`
 - `FMP_API_KEY`
+- `MAX_FILING_SUMMARIES_PER_DAY`
+- `MAX_NEWS_SUMMARIES_PER_DAY`
 - `OBJECT_STORE_ENDPOINT_URL`
 - `OBJECT_STORE_ACCESS_KEY_ID`
 - `OBJECT_STORE_SECRET_ACCESS_KEY`
@@ -61,6 +63,7 @@ Notes:
 - `ENABLE_SCHEDULER` is already set to `true` in the Blueprint.
 - `MARKET_DATA_PROVIDER=fmp` is the intended production default.
 - `ENABLE_BROWSER_PDF_RENDERING` is already set to `true` in the Blueprint.
+- The default summary budgets are intentionally conservative: 12 filings/day and 24 news items/day.
 - The backend build now installs Chromium so HTML SEC filings can be rendered directly to PDF instead of going through the text fallback path.
 - Keep the Render API service at a single instance so scheduled jobs do not run more than once.
 - The backend health check path is `/health`.
@@ -132,6 +135,7 @@ Manual maintenance commands are available in [backend/app/jobs.py](/Users/christ
 - `python -m app.jobs refresh-market-caps --all`
 - `python -m app.jobs poll-sec-filings`
 - `python -m app.jobs ingest-news`
+- `python -m app.jobs summarize-pending filing --limit 5 --include-historical`
 - `python -m app.jobs build-weekly-digest`
 - `python -m app.jobs backfill-company <company_id> --max-filings 8`
 - `python -m app.jobs resummarize filing <item_id>`
@@ -151,6 +155,14 @@ If you only need to refresh company market caps without touching filings, use:
 ```bash
 cd /opt/render/project/src/backend
 python -m app.jobs refresh-market-caps --all --progress-every 50
+```
+
+If you want to spend a little budget on queued backlog items after a historical backfill, use:
+
+```bash
+cd /opt/render/project/src/backend
+python -m app.jobs summarize-pending filing --limit 5 --include-historical
+python -m app.jobs summarize-pending news --limit 10
 ```
 
 Then optionally refresh news and rebuild the digest:

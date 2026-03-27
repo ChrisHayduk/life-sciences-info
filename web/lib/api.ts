@@ -19,6 +19,7 @@ export type FilingListItem = {
   impact_score: number;
   composite_score: number;
   score_explanation: ScoreExplanation;
+  summary_status: string;
   summary: string;
   original_document_url: string;
   pdf_download_url?: string | null;
@@ -72,6 +73,7 @@ export type NewsItem = {
   market_cap_score: number;
   composite_score: number;
   score_explanation: ScoreExplanation;
+  summary_status: string;
   summary: string;
   key_takeaways: string[];
 };

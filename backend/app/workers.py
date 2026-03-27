@@ -11,6 +11,7 @@ from app.jobs import (
     run_poll_sec_filings,
     run_refresh_market_caps,
     run_resummarize_item,
+    run_summarize_pending,
     run_sync_universe,
 )
 
@@ -35,13 +36,18 @@ def refresh_market_caps(count: int | None = None) -> dict[str, int | str | None]
 
 
 @dramatiq.actor
-def poll_sec_filings() -> int:
+def poll_sec_filings() -> dict[str, int]:
     return run_poll_sec_filings()
 
 
 @dramatiq.actor
-def ingest_news() -> int:
+def ingest_news() -> dict[str, int]:
     return run_ingest_news()
+
+
+@dramatiq.actor
+def summarize_pending(kind: str, limit: int | None = None) -> dict[str, int]:
+    return run_summarize_pending(kind, limit=limit, automated=False)
 
 
 @dramatiq.actor

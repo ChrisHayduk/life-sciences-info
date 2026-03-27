@@ -48,12 +48,21 @@ export default async function FilingDetailPage({ params }: { params: Promise<{ i
         <div className="detail-section">
           <span className="eyebrow">AI Summary</span>
           <h2>Key takeaways</h2>
-          <p>{filing.summary}</p>
-          <ul className="list-reset">
-            {filing.key_takeaways.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
+          {filing.summary_status === "complete" ? (
+            <>
+              <p>{filing.summary}</p>
+              <ul className="list-reset">
+                {filing.key_takeaways.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <EmptyPanel
+              title="Summary queued"
+              body="This filing is stored and ranked already. AI summary generation is budget-limited and will run automatically for higher-priority new items."
+            />
+          )}
         </div>
         <div className="detail-section">
           <span className="eyebrow">Risk Lens</span>
@@ -61,17 +70,21 @@ export default async function FilingDetailPage({ params }: { params: Promise<{ i
           <p className="muted">
             Score confidence: {filing.score_explanation?.confidence ?? "high"}.
           </p>
-          <ul className="list-reset">
-            {filing.material_changes.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-            {filing.risk_flags.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-            {filing.opportunity_flags.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
+          {filing.summary_status === "complete" ? (
+            <ul className="list-reset">
+              {filing.material_changes.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+              {filing.risk_flags.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+              {filing.opportunity_flags.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">The provisional rank currently uses market cap, form type, recency, and material keywords.</p>
+          )}
         </div>
       </section>
 

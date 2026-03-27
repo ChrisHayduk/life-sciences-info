@@ -10,6 +10,7 @@ from app.models import Filing as FilingModel
 from app.models import NewsItem as NewsItemModel
 from app.services.digests import DigestService
 from app.services.filings import FilingService
+from app.services.market_caps import MarketCapService
 from app.services.news import NewsService
 from app.services.universe import UniverseService
 
@@ -37,6 +38,33 @@ def run_sync_universe(
     )
 
 
+def _load_active_companies(session, focus_tickers: list[str] | None = None) -> list[Company]:
+    companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+    if focus_tickers:
+        focus = {ticker.upper() for ticker in focus_tickers}
+        companies = [company for company in companies if (company.ticker or "").upper() in focus]
+    return sorted(companies, key=lambda company: (-(company.market_cap or 0), company.name, company.ticker or company.cik))
+
+
+def run_refresh_market_caps(
+    *,
+    count: int | None = None,
+    focus_tickers: list[str] | None = None,
+    progress_callback=None,
+    progress_every: int = 100,
+) -> dict[str, int | str | None]:
+    def _run(session):
+        companies = _load_active_companies(session, focus_tickers=focus_tickers)
+        selected = companies[:count] if count else companies
+        return MarketCapService(session).refresh_market_caps(
+            selected,
+            progress_callback=progress_callback,
+            progress_every=progress_every,
+        )
+
+    return _with_session(_run)
+
+
 def run_backfill_company(
     company_id: int,
     max_filings: int | None = None,
@@ -62,11 +90,7 @@ def run_backfill_top_companies(
     focus_tickers: list[str] | None = None,
 ) -> int:
     def _run(session):
-        companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-        if focus_tickers:
-            focus = {ticker.upper() for ticker in focus_tickers}
-            companies = [company for company in companies if (company.ticker or "").upper() in focus]
-        companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
+        companies = _load_active_companies(session, focus_tickers=focus_tickers)
         selected = companies[:count]
         filing_service = FilingService(session)
         created = 0
@@ -162,21 +186,27 @@ def run_refresh_all_data(
     include_news: bool = True,
     build_digest: bool = True,
 ) -> dict[str, int]:
-    def _sync_and_select(session):
+    def _sync(session):
         universe_service = UniverseService(session, only_tickers=focus_tickers)
         synced = universe_service.sync_universe(
             limit=sync_limit,
             progress_callback=lambda message: print(message, flush=True),
             progress_every=progress_every,
         )
+        return synced
 
-        companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-        if focus_tickers:
-            focus = {ticker.upper() for ticker in focus_tickers}
-            companies = [company for company in companies if (company.ticker or "").upper() in focus]
-        companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
+    synced = _with_session(_sync)
+
+    market_cap_result = run_refresh_market_caps(
+        focus_tickers=focus_tickers,
+        progress_callback=lambda message: print(message, flush=True),
+        progress_every=progress_every,
+    )
+
+    def _select(session):
+        companies = _load_active_companies(session, focus_tickers=focus_tickers)
         selected = companies[:company_count] if company_count else companies
-        selected_snapshot = [
+        return [
             {
                 "id": company.id,
                 "name": company.name,
@@ -185,9 +215,8 @@ def run_refresh_all_data(
             }
             for company in selected
         ]
-        return synced, selected_snapshot
 
-    synced, selected = _with_session(_sync_and_select)
+    selected = _with_session(_select)
 
     reprocessed_total = 0
     backfilled_total = 0
@@ -230,6 +259,9 @@ def run_refresh_all_data(
     return {
         "companies": len(selected),
         "synced_companies": synced,
+        "market_cap_companies": int(market_cap_result["companies"] or 0),
+        "refreshed_market_caps": int(market_cap_result["refreshed"] or 0),
+        "failed_market_caps": int(market_cap_result["failed"] or 0),
         "reprocessed_filings": reprocessed_total,
         "new_filings": backfilled_total,
         "news_items": news_count,
@@ -244,6 +276,19 @@ def main() -> None:
     sync_universe_parser = subparsers.add_parser("sync-universe", help="Refresh the covered company universe.")
     sync_universe_parser.add_argument("--limit", type=int, default=None)
     sync_universe_parser.add_argument("--progress-every", type=int, default=100)
+
+    refresh_market_caps_parser = subparsers.add_parser(
+        "refresh-market-caps",
+        help="Refresh company market caps for all active issuers or a top subset.",
+    )
+    refresh_market_caps_parser.add_argument("--all", action="store_true")
+    refresh_market_caps_parser.add_argument("--count", type=int, default=None)
+    refresh_market_caps_parser.add_argument("--progress-every", type=int, default=100)
+    refresh_market_caps_parser.add_argument(
+        "--focus-tickers",
+        default="",
+        help="Comma-separated tickers to constrain the target set, e.g. PFE,MRK,AMGN",
+    )
 
     backfill_parser = subparsers.add_parser("backfill-company", help="Backfill filings for one company.")
     backfill_parser.add_argument("company_id", type=int)
@@ -315,6 +360,24 @@ def main() -> None:
         )
         print(f"Backfilled {count} filings for company {args.company_id}", flush=True)
         return
+    if args.command == "refresh-market-caps":
+        if args.all and args.count is not None:
+            raise SystemExit("Use either --all or --count, not both")
+        focus_tickers = [ticker.strip().upper() for ticker in args.focus_tickers.split(",") if ticker.strip()]
+        result = run_refresh_market_caps(
+            count=None if args.all else args.count,
+            focus_tickers=focus_tickers or None,
+            progress_every=args.progress_every,
+            progress_callback=lambda message: print(message, flush=True),
+        )
+        print(
+            "Market cap refresh complete: "
+            f"{result['companies']} companies, "
+            f"{result['refreshed']} refreshed, "
+            f"{result['failed']} failed",
+            flush=True,
+        )
+        return
     if args.command == "backfill-top-companies":
         focus_tickers = [ticker.strip().upper() for ticker in args.focus_tickers.split(",") if ticker.strip()]
         count = run_backfill_top_companies(
@@ -360,6 +423,8 @@ def main() -> None:
         print(
             "Refresh complete: "
             f"{result['companies']} companies, "
+            f"{result['refreshed_market_caps']} refreshed market caps, "
+            f"{result['failed_market_caps']} failed market caps, "
             f"{result['reprocessed_filings']} rebuilt filings, "
             f"{result['new_filings']} new filings, "
             f"{result['news_items']} news items",

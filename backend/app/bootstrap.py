@@ -8,6 +8,7 @@ from app.db import SessionLocal, init_db
 from app.models import Company
 from app.services.digests import DigestService
 from app.services.filings import FilingService
+from app.services.market_caps import MarketCapService
 from app.services.news import NewsService
 from app.services.universe import UniverseService
 
@@ -26,6 +27,7 @@ def bootstrap(
     init_db()
     session = SessionLocal()
     try:
+        focus = {ticker.upper() for ticker in (focus_tickers or [])}
         synced = UniverseService(session, only_tickers=focus_tickers).sync_universe(
             limit=sync_limit,
             progress_every=sync_progress_every,
@@ -34,8 +36,20 @@ def bootstrap(
         print(f"Universe sync complete: {synced} companies", flush=True)
 
         companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-        if focus_tickers:
-            companies = [company for company in companies if (company.ticker or "").upper() in set(focus_tickers)]
+        if focus:
+            companies = [company for company in companies if (company.ticker or "").upper() in focus]
+
+        market_cap_result = MarketCapService(session).refresh_market_caps(
+            companies,
+            progress_callback=lambda message: print(message, flush=True),
+            progress_every=sync_progress_every,
+        )
+        print(
+            f"Market cap refresh complete: {market_cap_result['refreshed']} refreshed, "
+            f"{market_cap_result['failed']} failed",
+            flush=True,
+        )
+
         companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
 
         filing_service = FilingService(session)

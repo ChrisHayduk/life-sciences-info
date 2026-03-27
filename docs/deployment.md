@@ -45,7 +45,8 @@ Set these required environment variables during Blueprint creation:
 
 - `SEC_USER_AGENT`
 - `OPENAI_API_KEY`
-- `ALPHA_VANTAGE_API_KEY`
+- `MARKET_DATA_PROVIDER`
+- `FMP_API_KEY`
 - `OBJECT_STORE_ENDPOINT_URL`
 - `OBJECT_STORE_ACCESS_KEY_ID`
 - `OBJECT_STORE_SECRET_ACCESS_KEY`
@@ -58,6 +59,7 @@ Set these required environment variables during Blueprint creation:
 Notes:
 
 - `ENABLE_SCHEDULER` is already set to `true` in the Blueprint.
+- `MARKET_DATA_PROVIDER=fmp` is the intended production default.
 - `ENABLE_BROWSER_PDF_RENDERING` is already set to `true` in the Blueprint.
 - The backend build now installs Chromium so HTML SEC filings can be rendered directly to PDF instead of going through the text fallback path.
 - Keep the Render API service at a single instance so scheduled jobs do not run more than once.
@@ -121,11 +123,13 @@ The backend service will automatically:
 - poll SEC filings every 30 minutes
 - ingest news every 6 hours
 - sync the issuer universe weekly
+- refresh market caps weekly
 - build the weekly digest every Monday at 8:00 AM America/New_York
 
 Manual maintenance commands are available in [backend/app/jobs.py](/Users/christopherhayduk/Desktop/life-sciences-info/backend/app/jobs.py):
 
 - `python -m app.jobs sync-universe`
+- `python -m app.jobs refresh-market-caps --all`
 - `python -m app.jobs poll-sec-filings`
 - `python -m app.jobs ingest-news`
 - `python -m app.jobs build-weekly-digest`
@@ -140,6 +144,13 @@ If you need to overwrite older bad PDFs, parsed sections, and stale market caps 
 ```bash
 cd /opt/render/project/src/backend
 python -m app.jobs refresh-all-data --sync-limit 5000 --company-count 250 --years-back 3 --skip-news --skip-digest
+```
+
+If you only need to refresh company market caps without touching filings, use:
+
+```bash
+cd /opt/render/project/src/backend
+python -m app.jobs refresh-market-caps --all --progress-every 50
 ```
 
 Then optionally refresh news and rebuild the digest:

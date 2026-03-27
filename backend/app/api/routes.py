@@ -15,6 +15,7 @@ from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyRespo
 from app.jobs import run_resummarize_item
 from app.services.digests import DigestService
 from app.services.filings import FilingService
+from app.services.market_caps import MarketCapService
 from app.services.news import NewsService
 from app.services.storage import ObjectStore
 from app.services.universe import UniverseService, describe_universe_reason
@@ -162,6 +163,18 @@ def admin_backfill_company(
 ) -> AdminActionResponse:
     count = FilingService(session).backfill_company(company_id, max_filings=max_filings, years_back=years_back)
     return AdminActionResponse(status="ok", message=f"Backfilled {count} filings for company {company_id}.")
+
+
+@router.post("/admin/refresh-market-caps", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_refresh_market_caps(count: int | None = None, session: Session = Depends(get_session)) -> AdminActionResponse:
+    companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+    companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
+    selected = companies[:count] if count else companies
+    result = MarketCapService(session).refresh_market_caps(selected)
+    return AdminActionResponse(
+        status="ok",
+        message=f"Refreshed market caps for {result['refreshed']} companies; {result['failed']} failed.",
+    )
 
 
 @router.post("/admin/poll-filings", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])

@@ -21,11 +21,6 @@ class FakeSECClient:
         return payloads[cik]
 
 
-class FakeMarketDataClient:
-    def fetch_market_cap(self, ticker):
-        return {"market_cap": 2_000_000_000, "source": "test", "as_of": None}
-
-
 def test_is_core_life_sciences_and_overrides():
     assert is_core_life_sciences("2834") is True
     assert is_core_life_sciences("7372") is False
@@ -37,7 +32,6 @@ def test_sync_universe_filters_by_sic_and_honors_overrides(db_session):
     service = UniverseService(
         db_session,
         sec_client=FakeSECClient(),
-        market_data_client=FakeMarketDataClient(),
         allowlist={"MANU"},
         denylist={"TOOLS"},
     )
@@ -56,7 +50,6 @@ def test_sync_universe_reports_progress_when_callback_is_provided(db_session):
     service = UniverseService(
         db_session,
         sec_client=FakeSECClient(),
-        market_data_client=FakeMarketDataClient(),
         allowlist={"MANU"},
         denylist={"TOOLS"},
     )
@@ -68,4 +61,4 @@ def test_sync_universe_reports_progress_when_callback_is_provided(db_session):
     assert any("scanned 1/3 issuers" in message for message in messages)
     assert any("scanned 2/3 issuers" in message for message in messages)
     assert any("scanned 3/3 issuers" in message for message in messages)
-    assert messages[-1] == "Universe sync complete: matched 2 covered companies, market caps refreshed 2, failed 0"
+    assert messages[-1] == "Universe sync complete: matched 2 covered companies"

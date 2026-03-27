@@ -17,6 +17,8 @@ services:
           property: connectionString
       - key: OPENAI_MODEL
         value: gpt-5-mini
+      - key: MARKET_DATA_PROVIDER
+        value: fmp
       - key: OBJECT_STORE_REGION
         value: auto
       - key: ENABLE_SCHEDULER
@@ -27,6 +29,10 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: FMP_API_KEY
+        sync: false
+      - key: FMP_BASE_URL
+        value: https://financialmodelingprep.com/stable
       - key: ALPHA_VANTAGE_API_KEY
         sync: false
       - key: OBJECT_STORE_ENDPOINT_URL

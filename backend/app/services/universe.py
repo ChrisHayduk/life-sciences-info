@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 from app.models import Company
 from app.services.constants import CORE_LIFE_SCIENCES_SIC
-from app.services.market_data import MarketDataClient
 from app.services.sec import SECClient
 
 
@@ -39,14 +38,12 @@ class UniverseService:
         self,
         session: Session,
         sec_client: SECClient | None = None,
-        market_data_client: MarketDataClient | None = None,
         allowlist: Iterable[str] | None = None,
         denylist: Iterable[str] | None = None,
         only_tickers: Iterable[str] | None = None,
     ) -> None:
         self.session = session
         self.sec_client = sec_client or SECClient()
-        self.market_data_client = market_data_client or MarketDataClient()
         self.allowlist = {value.upper() for value in (allowlist or [])}
         self.denylist = {value.upper() for value in (denylist or [])}
         self.only_tickers = {value.upper() for value in (only_tickers or [])}
@@ -58,9 +55,6 @@ class UniverseService:
         progress_every: int = 100,
     ) -> int:
         count = 0
-        market_cap_successes = 0
-        market_cap_failures = 0
-        last_market_cap_error: str | None = None
         ticker_rows = self.sec_client.get_company_tickers()
         if self.only_tickers:
             ticker_rows = [row for row in ticker_rows if ((row.get("ticker") or "").upper() in self.only_tickers)]
@@ -96,16 +90,6 @@ class UniverseService:
                     "phone": submission.get("phone"),
                 }
 
-                try:
-                    market = self.market_data_client.fetch_market_cap(company.ticker)
-                    company.market_cap = market["market_cap"]
-                    company.market_cap_source = market["source"]
-                    company.market_cap_updated_at = market["as_of"]
-                    market_cap_successes += 1
-                except Exception as exc:
-                    market_cap_failures += 1
-                    last_market_cap_error = str(exc)
-
                 count += 1
 
             if progress_callback and (index == total_rows or index % progress_every == 0):
@@ -115,8 +99,5 @@ class UniverseService:
 
         self.session.commit()
         if progress_callback:
-            suffix = f", market caps refreshed {market_cap_successes}, failed {market_cap_failures}"
-            if last_market_cap_error:
-                suffix += f" (last error: {last_market_cap_error})"
-            progress_callback(f"Universe sync complete: matched {count} covered companies{suffix}")
+            progress_callback(f"Universe sync complete: matched {count} covered companies")
         return count

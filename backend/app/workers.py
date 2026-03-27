@@ -9,6 +9,7 @@ from app.jobs import (
     run_build_weekly_digest,
     run_ingest_news,
     run_poll_sec_filings,
+    run_refresh_market_caps,
     run_resummarize_item,
     run_sync_universe,
 )
@@ -26,6 +27,11 @@ def sync_universe(limit: int | None = None) -> int:
 @dramatiq.actor
 def backfill_company(company_id: int) -> int:
     return run_backfill_company(company_id)
+
+
+@dramatiq.actor
+def refresh_market_caps(count: int | None = None) -> dict[str, int | str | None]:
+    return run_refresh_market_caps(count=count)
 
 
 @dramatiq.actor

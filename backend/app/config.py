@@ -1,6 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, List
+from typing import Annotated, List, Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openai_api_base: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-5-mini"
+    market_data_provider: Literal["fmp", "alpha_vantage", "none"] = "fmp"
+    fmp_api_key: str | None = None
+    fmp_base_url: str = "https://financialmodelingprep.com/stable"
     alpha_vantage_api_key: str | None = None
     alpha_vantage_base_url: str = "https://www.alphavantage.co/query"
     object_store_endpoint_url: str | None = Field(
@@ -69,6 +72,13 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
+    @field_validator("market_data_provider", mode="before")
+    @classmethod
+    def normalize_market_data_provider(cls, value):
+        if value is None or value == "":
+            return "fmp"
+        return str(value).strip().lower()
 
 
 @lru_cache(maxsize=1)

@@ -205,9 +205,14 @@ def run_refresh_all_data(
         reprocessed, added = _with_session(_refresh_company)
         reprocessed_total += reprocessed
         backfilled_total += added
+        rebuild_label = (
+            f"{reprocessed} rebuilt"
+            if reprocessed
+            else "0 rebuilt (no existing filings to rebuild)"
+        )
         print(
             f"[{index}/{len(selected)}] Refreshed {company['name']} ({company['ticker'] or company['cik']}): "
-            f"{reprocessed} rebuilt, {added} added",
+            f"{rebuild_label}, {added} added",
             flush=True,
         )
 

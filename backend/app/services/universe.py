@@ -58,6 +58,9 @@ class UniverseService:
         progress_every: int = 100,
     ) -> int:
         count = 0
+        market_cap_successes = 0
+        market_cap_failures = 0
+        last_market_cap_error: str | None = None
         ticker_rows = self.sec_client.get_company_tickers()
         if self.only_tickers:
             ticker_rows = [row for row in ticker_rows if ((row.get("ticker") or "").upper() in self.only_tickers)]
@@ -98,8 +101,10 @@ class UniverseService:
                     company.market_cap = market["market_cap"]
                     company.market_cap_source = market["source"]
                     company.market_cap_updated_at = market["as_of"]
-                except Exception:
-                    pass
+                    market_cap_successes += 1
+                except Exception as exc:
+                    market_cap_failures += 1
+                    last_market_cap_error = str(exc)
 
                 count += 1
 
@@ -110,5 +115,8 @@ class UniverseService:
 
         self.session.commit()
         if progress_callback:
-            progress_callback(f"Universe sync complete: matched {count} covered companies")
+            suffix = f", market caps refreshed {market_cap_successes}, failed {market_cap_failures}"
+            if last_market_cap_error:
+                suffix += f" (last error: {last_market_cap_error})"
+            progress_callback(f"Universe sync complete: matched {count} covered companies{suffix}")
         return count

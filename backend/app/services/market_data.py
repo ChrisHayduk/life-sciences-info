@@ -32,6 +32,12 @@ class MarketDataClient:
         )
         response.raise_for_status()
         payload = response.json()
+        if payload.get("Error Message"):
+            raise RuntimeError(f"Alpha Vantage rejected {ticker}: {payload['Error Message']}")
+        if payload.get("Information"):
+            raise RuntimeError(f"Alpha Vantage info for {ticker}: {payload['Information']}")
+        if payload.get("Note"):
+            raise RuntimeError(f"Alpha Vantage rate limit for {ticker}: {payload['Note']}")
         market_cap = payload.get("MarketCapitalization")
         if not market_cap:
             raise RuntimeError(f"No market cap returned for {ticker}")
@@ -40,4 +46,3 @@ class MarketDataClient:
             "source": "alpha_vantage_overview",
             "as_of": datetime.now(timezone.utc),
         }
-

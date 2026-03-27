@@ -55,26 +55,43 @@ def init_db() -> None:
 
 def _ensure_compatible_schema() -> None:
     inspector = inspect(engine)
-    if not inspector.has_table("companies"):
-        return
+    if inspector.has_table("companies"):
+        market_cap_column = next(
+            (column for column in inspector.get_columns("companies") if column["name"] == "market_cap"),
+            None,
+        )
+        if market_cap_column is not None:
+            type_name = market_cap_column["type"].__class__.__name__.upper()
+            if type_name not in {"BIGINTEGER", "BIGINT"} and engine.dialect.name == "postgresql":
+                with engine.begin() as connection:
+                    connection.execute(text("ALTER TABLE companies ALTER COLUMN market_cap TYPE BIGINT"))
 
-    market_cap_column = next((column for column in inspector.get_columns("companies") if column["name"] == "market_cap"), None)
-    if market_cap_column is None:
-        return
+    _add_missing_columns(
+        table_name="news_items",
+        columns={
+            "company_tag_ids": "JSON",
+        },
+    )
+    _add_missing_columns(
+        table_name="filings",
+        columns={
+            "item_numbers": "JSON",
+            "diff_json": "JSON",
+            "diff_status": "VARCHAR(32)",
+        },
+    )
 
-    type_name = market_cap_column["type"].__class__.__name__.upper()
-    if type_name not in {"BIGINTEGER", "BIGINT"} and engine.dialect.name == "postgresql":
-        with engine.begin() as connection:
-            connection.execute(text("ALTER TABLE companies ALTER COLUMN market_cap TYPE BIGINT"))
 
+def _add_missing_columns(*, table_name: str, columns: dict[str, str]) -> None:
     inspector = inspect(engine)
-    if not inspector.has_table("news_items"):
+    if not inspector.has_table(table_name):
         return
 
-    news_columns = {column["name"] for column in inspector.get_columns("news_items")}
-    if "company_tag_ids" in news_columns:
+    existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+    missing_columns = {name: sql_type for name, sql_type in columns.items() if name not in existing_columns}
+    if not missing_columns:
         return
 
-    alter_type = "JSON"
     with engine.begin() as connection:
-        connection.execute(text(f"ALTER TABLE news_items ADD COLUMN company_tag_ids {alter_type}"))
+        for column_name, sql_type in missing_columns.items():
+            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_type}"))

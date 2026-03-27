@@ -61,9 +61,9 @@ def run_refresh_market_caps(
             progress_callback=progress_callback,
             progress_every=progress_every,
         )
-        refreshed_company_ids = [int(company_id) for company_id in (result.get("refreshed_company_ids") or [])]
-        reranked_filings = FilingService(session).rerank_for_companies(refreshed_company_ids)
-        reranked_news = NewsService(session).rerank_for_companies(refreshed_company_ids)
+        selected_company_ids = [int(company.id) for company in selected]
+        reranked_filings = FilingService(session).rerank_for_companies(selected_company_ids)
+        reranked_news = NewsService(session).rerank_for_companies(selected_company_ids)
         return {
             "companies": int(result.get("companies") or 0),
             "refreshed": int(result.get("refreshed") or 0),

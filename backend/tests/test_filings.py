@@ -174,6 +174,28 @@ def test_html_to_text_strips_xbrl_noise_and_parse_sections_prefers_body_over_toc
     assert sections["financial_statements"].startswith("Consolidated statements follow.")
 
 
+def test_html_to_text_handles_nested_hidden_tags_without_crashing():
+    html = """
+    <html>
+      <body>
+        <div style="display:none">
+          <span>mrk:NoiseMember</span>
+          <span>us-gaap:PendingLitigationMember</span>
+        </div>
+        <h1>Item 1.</h1>
+        <h2>Business</h2>
+        <p>Visible operating text.</p>
+      </body>
+    </html>
+    """
+
+    text = html_to_text(html.encode("utf-8"), "text/html")
+
+    assert "Visible operating text." in text
+    assert "mrk:NoiseMember" not in text
+    assert "us-gaap:PendingLitigationMember" not in text
+
+
 def test_backfill_loads_target_forms_and_dedupes_on_rerun(db_session, company, tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
     from app.config import get_settings

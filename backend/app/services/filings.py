@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -169,6 +169,8 @@ def _strip_html_noise(soup: BeautifulSoup) -> None:
         comment.extract()
 
     for tag in list(soup.find_all(True)):
+        if getattr(tag, "attrs", None) is None:
+            continue
         name = (tag.name or "").lower()
         style = MULTISPACE_RE.sub("", (tag.get("style") or "").lower())
         classes = " ".join(tag.get("class", [])).lower()
@@ -496,6 +498,7 @@ class FilingService:
         scores = compute_filing_scores(
             filing,
             company_market_cap_score=market_cap_scores.get(company.id, 0.0),
+            has_market_cap=company.market_cap is not None,
             prior_filing=prior,
         )
         filing.market_cap_score = float(scores["market_cap_score"])
@@ -595,6 +598,7 @@ class FilingService:
         scores = compute_filing_scores(
             filing,
             company_market_cap_score=market_cap_scores.get(company.id, 0.0),
+            has_market_cap=company.market_cap is not None,
             prior_filing=prior,
         )
         filing.market_cap_score = float(scores["market_cap_score"])
@@ -703,10 +707,22 @@ class FilingService:
             return None
         return (datetime.now(UTC) - relativedelta(years=years_back)).date()
 
-    def list_filings(self, limit: int = 50, company_id: int | None = None) -> list[FilingListItem]:
-        query = select(Filing, Company).join(Company, Filing.company_id == Company.id).order_by(Filing.composite_score.desc())
+    def list_filings(
+        self,
+        limit: int = 50,
+        company_id: int | None = None,
+        recent_days: int | None = None,
+    ) -> list[FilingListItem]:
+        query = (
+            select(Filing, Company)
+            .join(Company, Filing.company_id == Company.id)
+            .order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
+        )
         if company_id:
             query = query.where(Filing.company_id == company_id)
+        if recent_days is not None:
+            cutoff = datetime.now(UTC) - timedelta(days=recent_days)
+            query = query.where(Filing.filed_at >= cutoff)
         rows = self.session.execute(query.limit(limit)).all()
         return [self._to_list_item(filing, company) for filing, company in rows]
 

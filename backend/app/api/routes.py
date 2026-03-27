@@ -62,8 +62,8 @@ def get_dashboard(session: Session = Depends(get_session)) -> DashboardResponse:
     digest_service = DigestService(session)
     digests = digest_service.list_digests(limit=1)
     return DashboardResponse(
-        top_filings=filing_service.list_filings(limit=5),
-        top_news=news_service.list_news(limit=5),
+        top_filings=filing_service.list_filings(limit=5, recent_days=365),
+        top_news=news_service.list_news(limit=5, recent_days=30),
         latest_digest=digests[0] if digests else None,
         counts={
             "companies": session.scalar(select(func.count()).select_from(Company)) or 0,

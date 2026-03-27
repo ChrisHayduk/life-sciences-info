@@ -83,6 +83,8 @@ def material_event_score(text: str | None) -> float:
 
 def recency_score(published_at: datetime, now: datetime | None = None) -> float:
     now = now or datetime.now(timezone.utc)
+    if published_at.tzinfo is None:
+        published_at = published_at.replace(tzinfo=timezone.utc)
     age_hours = max((now - published_at).total_seconds() / 3600.0, 0.0)
     if age_hours <= 24:
         return 100.0
@@ -97,15 +99,18 @@ def compute_filing_scores(
     filing: Filing,
     *,
     company_market_cap_score: float,
+    has_market_cap: bool = True,
+    now: datetime | None = None,
     prior_filing: Filing | None = None,
 ) -> dict[str, float | str | dict]:
     llm_materiality = float((filing.summary_json or {}).get("importance_score", 0.0))
     novelty = novelty_score(filing.raw_text, prior_filing.raw_text if prior_filing else None)
     quantitative = quantitative_delta_score(filing.raw_text, prior_filing.raw_text if prior_filing else None)
     material = material_event_score(filing.raw_text)
-    impact = round((0.30 * novelty) + (0.25 * quantitative) + (0.20 * material) + (0.25 * llm_materiality), 2)
-    composite = round((0.35 * company_market_cap_score) + (0.65 * impact), 2)
-    confidence = "high" if company_market_cap_score else "degraded"
+    recency = recency_score(filing.filed_at, now=now)
+    impact = round((0.25 * novelty) + (0.20 * quantitative) + (0.15 * material) + (0.15 * llm_materiality) + (0.25 * recency), 2)
+    composite = round((0.20 * company_market_cap_score) + (0.50 * impact) + (0.30 * recency), 2)
+    confidence = "high" if has_market_cap else "degraded"
     return {
         "market_cap_score": round(company_market_cap_score, 2),
         "importance_score": round(llm_materiality, 2),
@@ -119,10 +124,11 @@ def compute_filing_scores(
                 "quantitative_delta": quantitative,
                 "material_events": material,
                 "llm_materiality": round(llm_materiality, 2),
+                "recency": round(recency, 2),
             },
             "rationale": [
-                "Composite = 0.35 market cap percentile + 0.65 impact score",
-                "Impact = 0.30 novelty + 0.25 quantitative delta + 0.20 material events + 0.25 LLM materiality",
+                "Composite = 0.20 market cap percentile + 0.50 impact score + 0.30 recency",
+                "Impact = 0.25 novelty + 0.20 quantitative delta + 0.15 material events + 0.15 LLM materiality + 0.25 recency",
             ],
             "confidence": confidence,
         },
@@ -137,9 +143,9 @@ def compute_news_scores(
 ) -> dict[str, float | dict]:
     importance = float((news_item.summary_json or {}).get("importance_score", 0.0))
     recency = recency_score(news_item.published_at, now=now)
-    weights = {"importance": 0.50, "source": 0.20, "market": 0.20, "recency": 0.10}
+    weights = {"importance": 0.35, "source": 0.15, "market": 0.15, "recency": 0.35}
     if not news_item.mentioned_companies:
-        weights = {"importance": 0.625, "source": 0.25, "market": 0.0, "recency": 0.125}
+        weights = {"importance": 0.50, "source": 0.20, "market": 0.0, "recency": 0.30}
     composite = round(
         (weights["importance"] * importance)
         + (weights["source"] * (news_item.source_weight * 100.0))
@@ -159,7 +165,7 @@ def compute_news_scores(
                 "recency": round(recency, 2),
             },
             "rationale": [
-                "News score = 0.50 LLM importance + 0.20 source/topic + 0.20 company market-cap + 0.10 recency",
+                "News score = 0.35 LLM importance + 0.15 source/topic + 0.15 company market-cap + 0.35 recency",
                 "Weights renormalize when no covered company is mentioned.",
             ],
             "confidence": "high" if news_item.mentioned_companies else "medium",

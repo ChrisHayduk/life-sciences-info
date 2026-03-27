@@ -75,35 +75,33 @@ class UniverseService:
 
             submission = self.sec_client.get_company_submissions(cik)
             sic = str(submission.get("sic") or "") or None
-            if not is_core_life_sciences(sic, allowlisted=allowlisted, denylisted=denylisted):
-                continue
+            if is_core_life_sciences(sic, allowlisted=allowlisted, denylisted=denylisted):
+                company = self.session.scalar(select(Company).where(Company.cik == cik))
+                if company is None:
+                    company = Company(cik=cik, name=row.get("name") or submission.get("name") or cik)
+                    self.session.add(company)
 
-            company = self.session.scalar(select(Company).where(Company.cik == cik))
-            if company is None:
-                company = Company(cik=cik, name=row.get("name") or submission.get("name") or cik)
-                self.session.add(company)
+                company.name = submission.get("name") or row.get("name") or company.name
+                company.ticker = ticker
+                company.exchange = row.get("exchange")
+                company.sic = sic
+                company.sic_description = submission.get("sicDescription") or CORE_LIFE_SCIENCES_SIC.get(sic)
+                company.universe_reason = "manual-allowlist" if allowlisted else "sic-allowlist"
+                company.is_active = True
+                company.extra_metadata = {
+                    "entityType": submission.get("entityType"),
+                    "phone": submission.get("phone"),
+                }
 
-            company.name = submission.get("name") or row.get("name") or company.name
-            company.ticker = ticker
-            company.exchange = row.get("exchange")
-            company.sic = sic
-            company.sic_description = submission.get("sicDescription") or CORE_LIFE_SCIENCES_SIC.get(sic)
-            company.universe_reason = "manual-allowlist" if allowlisted else "sic-allowlist"
-            company.is_active = True
-            company.extra_metadata = {
-                "entityType": submission.get("entityType"),
-                "phone": submission.get("phone"),
-            }
+                try:
+                    market = self.market_data_client.fetch_market_cap(company.ticker)
+                    company.market_cap = market["market_cap"]
+                    company.market_cap_source = market["source"]
+                    company.market_cap_updated_at = market["as_of"]
+                except Exception:
+                    pass
 
-            try:
-                market = self.market_data_client.fetch_market_cap(company.ticker)
-                company.market_cap = market["market_cap"]
-                company.market_cap_source = market["source"]
-                company.market_cap_updated_at = market["as_of"]
-            except Exception:
-                pass
-
-            count += 1
+                count += 1
 
             if progress_callback and (index == total_rows or index % progress_every == 0):
                 progress_callback(

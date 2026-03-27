@@ -39,3 +39,29 @@ def test_news_ingestion_dedupes_and_tags_company_mentions(db_session, company, m
     assert len(items) == 1
     assert any("Apex Bio" in item.mentioned_companies or "ABIO" in item.mentioned_companies for item in items)
     assert all("Sponsored" not in item.title for item in items)
+
+
+def test_news_titles_strip_html_on_ingest_and_response(db_session, company, monkeypatch):
+    entries = [
+        feedparser.FeedParserDict(
+            title='<a href="https://news.example.com/story" hreflang="en">Wave crashes after obesity trial</a>',
+            link="https://news.example.com/story",
+            summary="<p>Wave Life Sciences reported new obesity data.</p>",
+            published="Wed, 26 Mar 2026 09:21:00 GMT",
+        ),
+    ]
+
+    monkeypatch.setattr(feedparser, "parse", lambda url: feedparser.FeedParserDict(entries=entries))
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, text="<html><article><p>Wave Life Sciences reported new obesity data.</p></article></html>")
+    )
+    service = NewsService(db_session, http_client=httpx.Client(transport=transport))
+
+    inserted = service.ingest_feeds()
+    item = db_session.query(NewsItem).one()
+    response_item = service.list_news(limit=1)[0]
+
+    assert inserted == 1
+    assert item.title == "Wave crashes after obesity trial"
+    assert response_item.title == "Wave crashes after obesity trial"

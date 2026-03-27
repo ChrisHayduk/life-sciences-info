@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
 from typing import Iterable
@@ -43,6 +43,10 @@ def _published_at(entry: feedparser.FeedParserDict) -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _clean_html_text(value: str | None) -> str:
+    return BeautifulSoup(unescape(value or ""), "html.parser").get_text(" ", strip=True)
+
+
 class NewsService:
     def __init__(
         self,
@@ -64,7 +68,7 @@ class NewsService:
         for feed in NEWS_FEEDS:
             parsed = feedparser.parse(feed["feed_url"])
             for entry in parsed.entries:
-                title = (entry.get("title") or "").strip()
+                title = _clean_html_text(entry.get("title"))
                 if self._should_skip_entry(title):
                     continue
                 canonical_url = _normalize_url(entry.get("link", ""))
@@ -75,7 +79,7 @@ class NewsService:
                 if existing:
                     continue
 
-                excerpt = BeautifulSoup(unescape(entry.get("summary", "")), "html.parser").get_text(" ", strip=True) or None
+                excerpt = _clean_html_text(entry.get("summary")) or None
                 article_text = self._fetch_article_text(canonical_url) or excerpt or title
                 mentioned = self._detect_companies(f"{title}\n{article_text}", company_aliases)
                 topic_tags = sorted(set(feed["topic_tags"] + self._infer_topics(title, article_text)))
@@ -125,8 +129,12 @@ class NewsService:
         self.session.commit()
         return inserted
 
-    def list_news(self, limit: int = 50) -> list[NewsItemResponse]:
-        rows = self.session.scalars(select(NewsItem).order_by(NewsItem.composite_score.desc()).limit(limit)).all()
+    def list_news(self, limit: int = 50, recent_days: int | None = None) -> list[NewsItemResponse]:
+        query = select(NewsItem).order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc())
+        if recent_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
+            query = query.where(NewsItem.published_at >= cutoff)
+        rows = self.session.scalars(query.limit(limit)).all()
         return [self._to_response(item) for item in rows]
 
     def list_news_for_company(self, company: Company, limit: int = 20) -> list[NewsItemResponse]:
@@ -141,7 +149,7 @@ class NewsService:
         return NewsItemResponse(
             id=item.id,
             source_name=item.source_name,
-            title=item.title,
+            title=_clean_html_text(item.title),
             canonical_url=item.canonical_url,
             excerpt=item.excerpt,
             published_at=item.published_at,

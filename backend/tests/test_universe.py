@@ -66,4 +66,6 @@ def test_sync_universe_reports_progress_when_callback_is_provided(db_session):
     assert count == 2
     assert messages[0] == "Universe sync starting: scanning 3 SEC issuers"
     assert any("scanned 1/3 issuers" in message for message in messages)
+    assert any("scanned 2/3 issuers" in message for message in messages)
+    assert any("scanned 3/3 issuers" in message for message in messages)
     assert messages[-1] == "Universe sync complete: matched 2 covered companies"

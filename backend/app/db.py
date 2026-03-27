@@ -54,6 +54,8 @@ def init_db() -> None:
 
 
 def _ensure_compatible_schema() -> None:
+    from app import models  # noqa: F401
+
     inspector = inspect(engine)
     if inspector.has_table("companies"):
         market_cap_column = next(
@@ -66,32 +68,49 @@ def _ensure_compatible_schema() -> None:
                 with engine.begin() as connection:
                     connection.execute(text("ALTER TABLE companies ALTER COLUMN market_cap TYPE BIGINT"))
 
-    _add_missing_columns(
-        table_name="news_items",
-        columns={
-            "company_tag_ids": "JSON",
-        },
-    )
-    _add_missing_columns(
-        table_name="filings",
-        columns={
-            "item_numbers": "JSON",
-            "diff_json": "JSON",
-            "diff_status": "VARCHAR(32)",
-        },
-    )
+    _add_missing_model_columns()
 
 
-def _add_missing_columns(*, table_name: str, columns: dict[str, str]) -> None:
+def _add_missing_model_columns() -> None:
     inspector = inspect(engine)
-    if not inspector.has_table(table_name):
-        return
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
 
-    existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
-    missing_columns = {name: sql_type for name, sql_type in columns.items() if name not in existing_columns}
-    if not missing_columns:
-        return
+        existing_columns = {column["name"] for column in inspector.get_columns(table.name)}
+        missing_columns = [column for column in table.columns if column.name not in existing_columns]
+        if not missing_columns:
+            continue
 
-    with engine.begin() as connection:
-        for column_name, sql_type in missing_columns.items():
-            connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_type}"))
+        with engine.begin() as connection:
+            for column in missing_columns:
+                connection.execute(text(_add_column_sql(table.name, column)))
+
+def _add_column_sql(table_name: str, column) -> str:
+    preparer = engine.dialect.identifier_preparer
+    table_sql = preparer.quote(table_name)
+    column_sql = preparer.quote(column.name)
+    column_type = column.type.compile(dialect=engine.dialect)
+    statement = f"ALTER TABLE {table_sql} ADD COLUMN {column_sql} {column_type}"
+    default_sql = _default_sql(column)
+    if default_sql is not None:
+        statement += f" DEFAULT {default_sql}"
+    return statement
+
+
+def _default_sql(column) -> str | None:
+    default = column.default
+    if default is None or not getattr(default, "is_scalar", False):
+        return None
+
+    value = default.arg
+    literal_processor = column.type.literal_processor(engine.dialect)
+    if literal_processor is not None:
+        return literal_processor(value)
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    return None

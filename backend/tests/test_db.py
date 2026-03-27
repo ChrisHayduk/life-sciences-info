@@ -37,8 +37,10 @@ def test_ensure_compatible_schema_adds_missing_legacy_columns(monkeypatch):
     db_module._ensure_compatible_schema()
 
     inspector = inspect(engine)
+    company_columns = {column["name"] for column in inspector.get_columns("companies")}
     news_columns = {column["name"] for column in inspector.get_columns("news_items")}
     filing_columns = {column["name"] for column in inspector.get_columns("filings")}
 
+    assert {"aliases", "extra_metadata", "market_cap_currency", "universe_reason"} <= company_columns
     assert "company_tag_ids" in news_columns
     assert {"item_numbers", "diff_json", "diff_status"} <= filing_columns

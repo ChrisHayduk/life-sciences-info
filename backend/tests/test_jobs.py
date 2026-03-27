@@ -24,17 +24,49 @@ def test_run_refresh_market_caps_targets_top_companies(db_session, company, monk
 
         def refresh_market_caps(self, companies, *, progress_callback=None, progress_every=100):
             FakeMarketCapService.captured = [item.ticker for item in companies]
-            return {"companies": len(FakeMarketCapService.captured), "refreshed": len(FakeMarketCapService.captured), "failed": 0, "last_error": None}
+            return {
+                "companies": len(FakeMarketCapService.captured),
+                "refreshed": len(FakeMarketCapService.captured),
+                "failed": 0,
+                "last_error": None,
+                "refreshed_company_ids": [99],
+            }
+
+    class FakeFilingService:
+        reranked = []
+
+        def __init__(self, session):
+            self.session = session
+
+        def rerank_for_companies(self, company_ids):
+            FakeFilingService.reranked = list(company_ids)
+            return 4
+
+    class FakeNewsService:
+        reranked = []
+
+        def __init__(self, session):
+            self.session = session
+
+        def rerank_for_companies(self, company_ids):
+            FakeNewsService.reranked = list(company_ids)
+            return 2
 
     monkeypatch.setattr("app.jobs.init_db", lambda: None)
     monkeypatch.setattr("app.jobs.SessionLocal", lambda: db_session)
     monkeypatch.setattr(jobs, "_load_active_companies", lambda session, focus_tickers=None: [other, company])
     monkeypatch.setattr("app.jobs.MarketCapService", FakeMarketCapService)
+    monkeypatch.setattr("app.jobs.FilingService", FakeFilingService)
+    monkeypatch.setattr("app.jobs.NewsService", FakeNewsService)
 
     result = jobs.run_refresh_market_caps(count=1)
 
     assert FakeMarketCapService.captured == ["ZZZZ"]
     assert result["refreshed"] == 1
+    assert result["reranked_filings"] == 4
+    assert result["reranked_news"] == 2
+    assert FakeFilingService.reranked == [99]
+    assert FakeNewsService.reranked == [99]
 
 
 def test_run_refresh_all_data_refreshes_market_caps_before_selecting_companies(monkeypatch):
@@ -64,7 +96,12 @@ def test_run_refresh_all_data_refreshes_market_caps_before_selecting_companies(m
 
     monkeypatch.setattr(jobs, "UniverseService", FakeUniverseService)
     monkeypatch.setattr(jobs, "FilingService", FakeFilingService)
-    monkeypatch.setattr(jobs, "run_refresh_market_caps", lambda **kwargs: events.append("refresh_caps") or {"companies": 1, "refreshed": 1, "failed": 0, "last_error": None})
+    monkeypatch.setattr(
+        jobs,
+        "run_refresh_market_caps",
+        lambda **kwargs: events.append("refresh_caps")
+        or {"companies": 1, "refreshed": 1, "failed": 0, "last_error": None, "reranked_filings": 2, "reranked_news": 1},
+    )
     monkeypatch.setattr(jobs, "_load_active_companies", lambda session, focus_tickers=None: [company])
     monkeypatch.setattr(jobs, "_with_session", lambda callback: callback(object()))
 
@@ -73,3 +110,5 @@ def test_run_refresh_all_data_refreshes_market_caps_before_selecting_companies(m
     assert events[:4] == ["sync", "refresh_caps", "reprocess:1", "backfill:1"]
     assert result["refreshed_market_caps"] == 1
     assert result["failed_market_caps"] == 0
+    assert result["reranked_filings"] == 2
+    assert result["reranked_news"] == 1

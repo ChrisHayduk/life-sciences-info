@@ -164,6 +164,37 @@ class NewsService:
     def count_news_for_company(self, company: Company) -> int:
         return len(self._news_items_for_company(company))
 
+    def rerank_for_companies(self, company_ids: Iterable[int] | None = None) -> int:
+        target_ids = sorted({int(company_id) for company_id in (company_ids or [])})
+        if company_ids is not None and not target_ids:
+            return 0
+
+        companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        if not companies:
+            return 0
+
+        target_aliases: set[str] | None = None
+        if target_ids:
+            target_aliases = set()
+            for company in companies:
+                if company.id not in target_ids:
+                    continue
+                target_aliases.add(company.name)
+                if company.ticker:
+                    target_aliases.add(company.ticker)
+
+        news_items = self.session.scalars(select(NewsItem).order_by(NewsItem.published_at.desc(), NewsItem.id.desc())).all()
+        market_caps = company_market_cap_percentiles(self.session)
+        updated = 0
+        for news_item in news_items:
+            if target_aliases is not None and not (set(news_item.mentioned_companies or []) & target_aliases):
+                continue
+            self._apply_scores(news_item, companies, market_caps=market_caps)
+            updated += 1
+
+        self.session.commit()
+        return updated
+
     def _to_response(self, item: NewsItem) -> NewsItemResponse:
         summary = item.summary_json or {}
         return NewsItemResponse(
@@ -199,8 +230,14 @@ class NewsService:
         news_item.summary_attempts += 1
         news_item.extra_metadata = {**(news_item.extra_metadata or {}), "summary_trigger": trigger}
 
-    def _apply_scores(self, news_item: NewsItem, companies: list[Company]) -> None:
-        market_caps = company_market_cap_percentiles(self.session)
+    def _apply_scores(
+        self,
+        news_item: NewsItem,
+        companies: list[Company],
+        *,
+        market_caps: dict[int, float] | None = None,
+    ) -> None:
+        market_caps = market_caps or company_market_cap_percentiles(self.session)
         company_scores = [
             market_caps.get(company.id, 0.0)
             for company in companies

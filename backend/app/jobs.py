@@ -56,11 +56,22 @@ def run_refresh_market_caps(
     def _run(session):
         companies = _load_active_companies(session, focus_tickers=focus_tickers)
         selected = companies[:count] if count else companies
-        return MarketCapService(session).refresh_market_caps(
+        result = MarketCapService(session).refresh_market_caps(
             selected,
             progress_callback=progress_callback,
             progress_every=progress_every,
         )
+        refreshed_company_ids = [int(company_id) for company_id in (result.get("refreshed_company_ids") or [])]
+        reranked_filings = FilingService(session).rerank_for_companies(refreshed_company_ids)
+        reranked_news = NewsService(session).rerank_for_companies(refreshed_company_ids)
+        return {
+            "companies": int(result.get("companies") or 0),
+            "refreshed": int(result.get("refreshed") or 0),
+            "failed": int(result.get("failed") or 0),
+            "last_error": result.get("last_error"),
+            "reranked_filings": reranked_filings,
+            "reranked_news": reranked_news,
+        }
 
     return _with_session(_run)
 
@@ -297,6 +308,8 @@ def run_refresh_all_data(
         "market_cap_companies": int(market_cap_result["companies"] or 0),
         "refreshed_market_caps": int(market_cap_result["refreshed"] or 0),
         "failed_market_caps": int(market_cap_result["failed"] or 0),
+        "reranked_filings": int(market_cap_result["reranked_filings"] or 0),
+        "reranked_news": int(market_cap_result["reranked_news"] or 0),
         "reprocessed_filings": reprocessed_total,
         "new_filings": backfilled_total,
         "news_items": news_count,
@@ -417,7 +430,9 @@ def main() -> None:
             "Market cap refresh complete: "
             f"{result['companies']} companies, "
             f"{result['refreshed']} refreshed, "
-            f"{result['failed']} failed",
+            f"{result['failed']} failed, "
+            f"{result['reranked_filings']} filings reranked, "
+            f"{result['reranked_news']} news items reranked",
             flush=True,
         )
         return
@@ -491,6 +506,8 @@ def main() -> None:
             f"{result['companies']} companies, "
             f"{result['refreshed_market_caps']} refreshed market caps, "
             f"{result['failed_market_caps']} failed market caps, "
+            f"{result['reranked_filings']} reranked filings, "
+            f"{result['reranked_news']} reranked news items, "
             f"{result['reprocessed_filings']} rebuilt filings, "
             f"{result['new_filings']} new filings, "
             f"{result['news_items']} news items",

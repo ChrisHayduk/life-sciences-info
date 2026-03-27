@@ -618,6 +618,41 @@ class FilingService:
         remaining = budget_service.remaining("filing") if self.settings.openai_api_key else 0
         return {"summarized": summarized, "remaining_daily_budget": remaining}
 
+    def rerank_for_companies(self, company_ids: Iterable[int] | None = None) -> int:
+        target_ids = sorted({int(company_id) for company_id in (company_ids or [])})
+        if company_ids is not None and not target_ids:
+            return 0
+
+        company_query = select(Company).where(Company.is_active.is_(True))
+        if target_ids:
+            company_query = company_query.where(Company.id.in_(target_ids))
+        companies = self.session.scalars(company_query).all()
+        if not companies:
+            return 0
+
+        companies_by_id = {company.id: company for company in companies}
+        filing_query = select(Filing).order_by(Filing.company_id.asc(), Filing.filed_at.asc(), Filing.id.asc())
+        if target_ids:
+            filing_query = filing_query.where(Filing.company_id.in_(target_ids))
+        filings = self.session.scalars(filing_query).all()
+        market_cap_scores = company_market_cap_percentiles(self.session)
+
+        prior_by_group: dict[tuple[int, str], Filing] = {}
+        updated = 0
+        for filing in filings:
+            company = companies_by_id.get(filing.company_id)
+            if not company:
+                continue
+            group = comparable_group(filing.normalized_form_type)
+            prior = prior_by_group.get((filing.company_id, group))
+            filing.prior_comparable_filing_id = prior.id if prior else None
+            self._apply_scores(filing, company, prior_filing=prior, market_cap_scores=market_cap_scores)
+            prior_by_group[(filing.company_id, group)] = filing
+            updated += 1
+
+        self.session.commit()
+        return updated
+
     def _store_filing_artifacts(
         self,
         *,
@@ -694,8 +729,15 @@ class FilingService:
         filing.extra_metadata = {**(filing.extra_metadata or {}), "summary_trigger": trigger}
         self._apply_scores(filing, company, prior_filing=prior_filing)
 
-    def _apply_scores(self, filing: Filing, company: Company, *, prior_filing: Filing | None) -> None:
-        market_cap_scores = company_market_cap_percentiles(self.session)
+    def _apply_scores(
+        self,
+        filing: Filing,
+        company: Company,
+        *,
+        prior_filing: Filing | None,
+        market_cap_scores: dict[int, float] | None = None,
+    ) -> None:
+        market_cap_scores = market_cap_scores or company_market_cap_percentiles(self.session)
         if filing.summary_status == "complete":
             scores = compute_filing_scores(
                 filing,

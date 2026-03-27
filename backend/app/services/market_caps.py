@@ -33,6 +33,7 @@ class MarketCapService:
         refreshed = 0
         failed = 0
         last_error: str | None = None
+        refreshed_company_ids: list[int] = []
 
         if progress_callback:
             progress_callback(f"Market cap refresh starting: {total} companies")
@@ -58,6 +59,7 @@ class MarketCapService:
                     continue
                 self._apply_market_cap(company, result)
                 refreshed += 1
+                refreshed_company_ids.append(company.id)
 
             processed = min(start + len(batch), total)
             if progress_callback and (processed == total or processed % progress_every == 0):
@@ -79,6 +81,7 @@ class MarketCapService:
             "refreshed": refreshed,
             "failed": failed,
             "last_error": last_error,
+            "refreshed_company_ids": refreshed_company_ids,
         }
 
     @staticmethod

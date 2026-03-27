@@ -10,12 +10,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_session
+from app.jobs import run_ingest_news, run_poll_sec_filings, run_refresh_market_caps, run_resummarize_item, run_summarize_pending
 from app.models import Company, Digest, Filing, NewsItem
 from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
-from app.jobs import run_ingest_news, run_poll_sec_filings, run_resummarize_item, run_summarize_pending
 from app.services.digests import DigestService
 from app.services.filings import FilingService
-from app.services.market_caps import MarketCapService
 from app.services.news import NewsService
 from app.services.storage import ObjectStore
 from app.services.universe import UniverseService, describe_universe_reason
@@ -166,14 +165,14 @@ def admin_backfill_company(
 
 
 @router.post("/admin/refresh-market-caps", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
-def admin_refresh_market_caps(count: int | None = None, session: Session = Depends(get_session)) -> AdminActionResponse:
-    companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-    companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
-    selected = companies[:count] if count else companies
-    result = MarketCapService(session).refresh_market_caps(selected)
+def admin_refresh_market_caps(count: int | None = None) -> AdminActionResponse:
+    result = run_refresh_market_caps(count=count)
     return AdminActionResponse(
         status="ok",
-        message=f"Refreshed market caps for {result['refreshed']} companies; {result['failed']} failed.",
+        message=(
+            f"Refreshed market caps for {result['refreshed']} companies; {result['failed']} failed. "
+            f"Reranked {result['reranked_filings']} filings and {result['reranked_news']} news items."
+        ),
     )
 
 

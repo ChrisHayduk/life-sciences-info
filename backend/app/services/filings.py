@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup
 from bs4.element import Comment
 from dateutil import parser as date_parser
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import case, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -55,7 +55,8 @@ COMPANY_FILING_TYPE_PRIORITY = {
     "20-F": 1,
     "40-F": 2,
     "10-Q": 3,
-    "6-K": 4,
+    "8-K": 4,
+    "6-K": 5,
 }
 ITEM_HEADER_RE = re.compile(r"(?im)^\s*(?:part\s+[ivx]+\s*)?item\s+\d+[a-z]?\.")
 URL_ONLY_RE = re.compile(r"^(?:https?://\S+\s*)+$", re.IGNORECASE)
@@ -825,6 +826,40 @@ class FilingService:
         rows = self.session.execute(query.limit(limit)).all()
         return [self._to_list_item(filing, company) for filing, company in rows]
 
+    def list_filings_paginated(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        company_id: int | None = None,
+        form_type: str | None = None,
+        search: str | None = None,
+        sort_by: str = "composite_score",
+    ) -> dict:
+        query = select(Filing, Company).join(Company, Filing.company_id == Company.id)
+        count_query = select(func.count()).select_from(Filing).join(Company, Filing.company_id == Company.id)
+
+        if company_id:
+            query = query.where(Filing.company_id == company_id)
+            count_query = count_query.where(Filing.company_id == company_id)
+        if form_type:
+            query = query.where(Filing.normalized_form_type == form_type)
+            count_query = count_query.where(Filing.normalized_form_type == form_type)
+        if search:
+            pattern = f"%{search}%"
+            search_filter = Filing.title.ilike(pattern) | Company.name.ilike(pattern) | Company.ticker.ilike(pattern)
+            query = query.where(search_filter)
+            count_query = count_query.where(Filing.title.ilike(pattern) | Company.name.ilike(pattern) | Company.ticker.ilike(pattern))
+
+        if sort_by == "filed_at":
+            query = query.order_by(Filing.filed_at.desc(), Filing.composite_score.desc())
+        else:
+            query = query.order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
+
+        total = self.session.scalar(count_query) or 0
+        rows = self.session.execute(query.offset(offset).limit(limit)).all()
+        items = [self._to_list_item(filing, company) for filing, company in rows]
+        return {"items": items, "total": total, "offset": offset, "limit": limit}
+
     def get_filing_detail(self, filing_id: int) -> FilingDetail | None:
         row = self.session.execute(
             select(Filing, Company).join(Company, Filing.company_id == Company.id).where(Filing.id == filing_id)
@@ -842,12 +877,15 @@ class FilingService:
             risk_flags=summary.get("risk_flags", []),
             opportunity_flags=summary.get("opportunity_flags", []),
             evidence_sections=summary.get("evidence_sections", []),
+            entities=summary.get("entities", []),
             prior_comparable_filing_id=filing.prior_comparable_filing_id,
             prior_comparable_filing_url=(
                 f"{self.settings.frontend_base_url}/filings/{filing.prior_comparable_filing_id}"
                 if filing.prior_comparable_filing_id
                 else None
             ),
+            diff_json=filing.diff_json or {},
+            diff_status=filing.diff_status or "pending",
         )
 
     def _to_list_item(self, filing: Filing, company: Company) -> FilingListItem:

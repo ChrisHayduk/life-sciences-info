@@ -4,7 +4,7 @@ from secrets import compare_digest
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -20,9 +20,12 @@ from app.jobs import (
 )
 from app.models import Company, Digest, Filing, NewsItem
 from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
+from app.services.clinical_trials import ClinicalTrialsService
+from app.services.events import event_stream
 from app.services.digests import DigestService
 from app.services.filings import FilingService
 from app.services.news import NewsService
+from app.services.ranking import compute_company_trend
 from app.services.storage import ObjectStore
 from app.services.universe import UniverseService, describe_universe_reason
 
@@ -82,8 +85,17 @@ def get_dashboard(session: Session = Depends(get_session)) -> DashboardResponse:
 
 
 @router.get("/companies", response_model=list[CompanyResponse])
-def list_companies(session: Session = Depends(get_session)) -> list[CompanyResponse]:
-    companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+def list_companies(
+    search: str | None = None,
+    session: Session = Depends(get_session),
+) -> list[CompanyResponse]:
+    query = select(Company).where(Company.is_active.is_(True))
+    if search:
+        pattern = f"%{search}%"
+        query = query.where(
+            Company.name.ilike(pattern) | Company.ticker.ilike(pattern)
+        )
+    companies = session.scalars(query).all()
     companies.sort(key=lambda company: company.market_cap or 0, reverse=True)
     return [build_company_response(company) for company in companies]
 
@@ -103,6 +115,10 @@ def company_detail(company_id: int, session: Session = Depends(get_session)) -> 
     filings_count = session.scalar(select(func.count()).select_from(Filing).where(Filing.company_id == company.id)) or 0
     news_count = news_service.count_news_for_company(company)
 
+    trend = compute_company_trend(session, company.id)
+    trials_service = ClinicalTrialsService(session)
+    pipeline = trials_service.list_trials_for_company_grouped(company.id)
+
     return CompanyDetailResponse(
         **base.model_dump(),
         market_cap_updated_at=company.market_cap_updated_at,
@@ -110,12 +126,26 @@ def company_detail(company_id: int, session: Session = Depends(get_session)) -> 
         news_count=news_count,
         recent_filings=recent_filings,
         recent_news=recent_news,
+        trend=trend,
+        pipeline=pipeline,
     )
 
 
 @router.get("/filings")
-def list_filings(company_id: int | None = None, limit: int = 50, session: Session = Depends(get_session)):
-    return FilingService(session).list_filings(limit=limit, company_id=company_id)
+def list_filings(
+    company_id: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    form_type: str | None = None,
+    search: str | None = None,
+    sort_by: str = "composite_score",
+    session: Session = Depends(get_session),
+):
+    result = FilingService(session).list_filings_paginated(
+        limit=limit, offset=offset, company_id=company_id,
+        form_type=form_type, search=search, sort_by=sort_by,
+    )
+    return result
 
 
 @router.get("/filings/{filing_id}")
@@ -127,8 +157,19 @@ def filing_detail(filing_id: int, session: Session = Depends(get_session)):
 
 
 @router.get("/news")
-def list_news(limit: int = 50, session: Session = Depends(get_session)):
-    return NewsService(session).list_news(limit=limit)
+def list_news(
+    limit: int = 50,
+    offset: int = 0,
+    source_name: str | None = None,
+    search: str | None = None,
+    sort_by: str = "composite_score",
+    session: Session = Depends(get_session),
+):
+    result = NewsService(session).list_news_paginated(
+        limit=limit, offset=offset, source_name=source_name,
+        search=search, sort_by=sort_by,
+    )
+    return result
 
 
 @router.get("/digests")
@@ -144,6 +185,19 @@ def digest_detail(digest_id: int, session: Session = Depends(get_session)):
     return digest
 
 
+@router.get("/trials")
+def list_trials(
+    company_id: int | None = None,
+    phase: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    session: Session = Depends(get_session),
+):
+    return ClinicalTrialsService(session).list_trials(
+        company_id=company_id, phase=phase, status=status, limit=limit,
+    )
+
+
 @router.get("/artifacts/filings/{filing_id}/pdf")
 def filing_pdf(filing_id: int, session: Session = Depends(get_session)):
     filing = session.get(Filing, filing_id)
@@ -152,6 +206,16 @@ def filing_pdf(filing_id: int, session: Session = Depends(get_session)):
     store = ObjectStore()
     payload = store.get_bytes(filing.pdf_artifact_key)
     return Response(content=payload, media_type="application/pdf")
+
+
+@router.get("/events/stream")
+async def events_sse():
+    """Server-Sent Events endpoint for real-time notifications."""
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
 
 
 @router.post("/admin/sync-universe", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
@@ -250,3 +314,101 @@ def admin_resummarize(kind: str, item_id: int) -> AdminActionResponse:
         raise HTTPException(status_code=400, detail="kind must be 'filing' or 'news'")
     run_resummarize_item(kind, item_id)
     return AdminActionResponse(status="ok", message=f"Re-summarization triggered for {kind} {item_id}.")
+
+
+@router.post("/admin/poll-trials", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_poll_trials(limit: int | None = None, session: Session = Depends(get_session)) -> AdminActionResponse:
+    result = ClinicalTrialsService(session).poll_all_companies(limit=limit)
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Polled {result['companies_polled']} companies; "
+            f"{result['new_trials']} new trials, {result['updated_trials']} updated."
+        ),
+    )
+
+
+# ── Watchlist endpoints ──
+
+from app.models import Watchlist
+
+
+@router.get("/watchlists")
+def list_watchlists(session: Session = Depends(get_session)):
+    return session.scalars(select(Watchlist).order_by(Watchlist.created_at.desc())).all()
+
+
+@router.post("/watchlists")
+def create_watchlist(
+    name: str,
+    company_ids: str = "",
+    form_types: str = "",
+    topic_tags: str = "",
+    session: Session = Depends(get_session),
+):
+    watchlist = Watchlist(
+        name=name,
+        company_ids=[int(x) for x in company_ids.split(",") if x.strip()],
+        form_types=[x.strip() for x in form_types.split(",") if x.strip()],
+        topic_tags=[x.strip() for x in topic_tags.split(",") if x.strip()],
+    )
+    session.add(watchlist)
+    session.commit()
+    session.refresh(watchlist)
+    return watchlist
+
+
+@router.get("/watchlists/{watchlist_id}")
+def get_watchlist(watchlist_id: int, session: Session = Depends(get_session)):
+    watchlist = session.get(Watchlist, watchlist_id)
+    if not watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    return watchlist
+
+
+@router.get("/watchlists/{watchlist_id}/feed")
+def watchlist_feed(watchlist_id: int, limit: int = 30, session: Session = Depends(get_session)):
+    """Return filings and news matching a watchlist's criteria."""
+    watchlist = session.get(Watchlist, watchlist_id)
+    if not watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+
+    filing_service = FilingService(session)
+    news_service = NewsService(session)
+
+    filings = []
+    news = []
+    for cid in (watchlist.company_ids or []):
+        filings.extend(filing_service.list_filings(limit=10, company_id=cid))
+        news.extend(news_service.list_news_for_company_by_id(cid, limit=10))
+
+    # Deduplicate and sort by composite score
+    seen_filing_ids: set[int] = set()
+    unique_filings = []
+    for f in sorted(filings, key=lambda x: x.composite_score, reverse=True):
+        if f.id not in seen_filing_ids:
+            seen_filing_ids.add(f.id)
+            unique_filings.append(f)
+
+    seen_news_ids: set[int] = set()
+    unique_news = []
+    for n in sorted(news, key=lambda x: x.composite_score, reverse=True):
+        if n.id not in seen_news_ids:
+            seen_news_ids.add(n.id)
+            unique_news.append(n)
+
+    return {
+        "watchlist": watchlist,
+        "filings": unique_filings[:limit],
+        "news": unique_news[:limit],
+    }
+
+
+@router.delete("/watchlists/{watchlist_id}")
+def delete_watchlist(watchlist_id: int, session: Session = Depends(get_session)):
+    watchlist = session.get(Watchlist, watchlist_id)
+    if not watchlist:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    session.delete(watchlist)
+    session.commit()
+    return {"status": "ok", "message": f"Watchlist {watchlist_id} deleted."}

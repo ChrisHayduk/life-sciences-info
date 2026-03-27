@@ -28,6 +28,7 @@ FILING_FORM_BASE_SCORES = {
     "20-F": 95.0,
     "40-F": 95.0,
     "10-Q": 85.0,
+    "8-K": 75.0,
     "6-K": 65.0,
 }
 
@@ -248,4 +249,51 @@ def compute_pending_news_scores(
             ],
             "confidence": "medium",
         },
+    }
+
+
+def compute_company_trend(session: Session, company_id: int, filing_count: int = 4) -> dict:
+    """Analyze recent filings to detect if a company's risk profile is trending."""
+    filings = session.scalars(
+        select(Filing)
+        .where(Filing.company_id == company_id, Filing.summary_status == "complete")
+        .order_by(Filing.filed_at.desc())
+        .limit(filing_count)
+    ).all()
+
+    if len(filings) < 2:
+        return {"direction": "insufficient_data", "trend_score": 0, "risk_trend": "stable", "opportunity_trend": "stable", "filings_analyzed": len(filings)}
+
+    # Compute trends in composite scores
+    scores = [f.composite_score for f in reversed(filings)]
+    score_deltas = [scores[i] - scores[i - 1] for i in range(1, len(scores))]
+    avg_delta = sum(score_deltas) / len(score_deltas) if score_deltas else 0
+
+    # Count risk and opportunity flags across filings
+    risk_counts = [len((f.summary_json or {}).get("risk_flags", [])) for f in reversed(filings)]
+    opp_counts = [len((f.summary_json or {}).get("opportunity_flags", [])) for f in reversed(filings)]
+
+    risk_deltas = [risk_counts[i] - risk_counts[i - 1] for i in range(1, len(risk_counts))]
+    opp_deltas = [opp_counts[i] - opp_counts[i - 1] for i in range(1, len(opp_counts))]
+
+    avg_risk_delta = sum(risk_deltas) / len(risk_deltas) if risk_deltas else 0
+    avg_opp_delta = sum(opp_deltas) / len(opp_deltas) if opp_deltas else 0
+
+    # Determine direction
+    if avg_delta > 5:
+        direction = "improving"
+    elif avg_delta < -5:
+        direction = "deteriorating"
+    else:
+        direction = "stable"
+
+    risk_trend = "increasing" if avg_risk_delta > 0.5 else ("decreasing" if avg_risk_delta < -0.5 else "stable")
+    opp_trend = "increasing" if avg_opp_delta > 0.5 else ("decreasing" if avg_opp_delta < -0.5 else "stable")
+
+    return {
+        "direction": direction,
+        "trend_score": round(avg_delta, 2),
+        "risk_trend": risk_trend,
+        "opportunity_trend": opp_trend,
+        "filings_analyzed": len(filings),
     }

@@ -183,6 +183,24 @@ def test_run_retag_news_companies_returns_scan_update_counts(db_session, monkeyp
     assert result == {"scanned": 12, "updated": 5, "reranked": 12}
 
 
+def test_run_poll_trials_returns_company_and_trial_counts(db_session, monkeypatch):
+    class FakeClinicalTrialsService:
+        def __init__(self, session):
+            self.session = session
+
+        def poll_all_companies(self, limit=None):
+            assert limit == 15
+            return {"companies_polled": 15, "new_trials": 9, "updated_trials": 4}
+
+    monkeypatch.setattr("app.jobs.init_db", lambda: None)
+    monkeypatch.setattr("app.jobs.SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.jobs.ClinicalTrialsService", FakeClinicalTrialsService)
+
+    result = jobs.run_poll_trials(limit=15)
+
+    assert result == {"companies_polled": 15, "new_trials": 9, "updated_trials": 4}
+
+
 def test_run_resummarize_item_uses_service_level_manual_summary(db_session, monkeypatch):
     class FakeFilingService:
         called = None

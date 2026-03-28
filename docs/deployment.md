@@ -1,120 +1,301 @@
 # Deployment Guide
 
+This guide describes the current recommended deployment for the repository as it exists today.
+
 ## Recommended Stack
 
-This repository is prepared for a low-maintenance deployment built around:
+For a low-cost, low-maintenance single-user deployment:
 
-- Vercel for the `web/` Next.js frontend
-- Render for the `backend/` FastAPI API and managed Postgres
-- Cloudflare R2 for filing artifacts and generated PDFs
+- Frontend: Vercel
+- Backend API + embedded scheduler: Render web service
+- Database: Render Postgres
+- Object storage: Cloudflare R2
 
-This keeps the always-on footprint small:
+This is the default operating model the repo now optimizes for.
 
-- one frontend service
-- one backend service
-- one Postgres database
-- one object storage bucket
+## Why This Is The Recommended Path
 
-The backend scheduler runs inside the single Render API service, so you do not need a dedicated worker, Redis, or separate cron service for the default side-project deployment.
+- The backend scheduler is embedded in the API process, so you do not need separate cron or worker infrastructure for the default setup.
+- Render is simple for a single Python API plus Postgres.
+- Vercel is the easiest place to host the existing Next.js frontend.
+- Cloudflare R2 gives you inexpensive S3-compatible storage for filing artifacts and PDFs.
+- The app is already budget-limited around AI usage, so the remaining ongoing costs are mostly hosting and storage.
 
-## Why This Stack
+## What This Deployment Includes
 
-- Vercel is the easiest place to host the existing Next.js app.
-- Render Blueprints give you one-click provisioning for the Python API and Postgres from [render.yaml](/Users/christopherhayduk/Desktop/life-sciences-info/render.yaml).
-- Cloudflare R2 is S3-compatible and inexpensive for document storage.
-- Embedded scheduling keeps the operational surface area small.
+- 1 Vercel project for `web/`
+- 1 Render web service for `backend/`
+- 1 Render Postgres instance
+- 1 R2 bucket
 
-## Step 1: Create the R2 Bucket
+## What This Deployment Does Not Need
 
-Create one R2 bucket for artifacts and collect these values:
+For the default side-project setup, you do not need:
+
+- a separate Dramatiq worker
+- Redis
+- a separate scheduler service
+- a separate cron job service
+
+Those pieces still exist in the repo and in `docker-compose.yml`, but they are optional and not part of the recommended production footprint.
+
+## Before You Start
+
+You should already have:
+
+- an OpenAI API key
+- an FMP API key if using live market caps
+- a Render account
+- a Vercel account
+- a Cloudflare account with R2 enabled
+
+You should also decide what your SEC contact string will be. Example:
+
+```env
+SEC_USER_AGENT=LifeSciencesIntel/1.0 (you@yourdomain.com)
+```
+
+## Step 1: Create The R2 Bucket
+
+Create one R2 bucket for filing PDFs and artifacts.
+
+You will need:
 
 - `OBJECT_STORE_ENDPOINT_URL`
 - `OBJECT_STORE_ACCESS_KEY_ID`
 - `OBJECT_STORE_SECRET_ACCESS_KEY`
 - `OBJECT_STORE_BUCKET`
-
-For R2, set:
-
 - `OBJECT_STORE_REGION=auto`
 
-## Step 2: Deploy the Backend on Render
+For Cloudflare R2:
 
-Use the Blueprint in [render.yaml](/Users/christopherhayduk/Desktop/life-sciences-info/render.yaml).
+- use the account-level S3 endpoint, not the bucket URL with the bucket name appended
+- keep bucket public access disabled
+- you do not need browser CORS on the bucket for the current app design
 
-Set these required environment variables during Blueprint creation:
+## Step 2: Create Render Postgres
 
+Create a Postgres instance in the same region as the API service.
+
+Recommended settings:
+
+- Name: `life-sciences-intel-db`
+- Region: same as the backend service
+- Plan: `Basic-256mb` for the cheapest production starting point
+- Postgres major version: `16`
+
+After it is created, copy the internal connection string and use it as `DATABASE_URL` on the backend service.
+
+## Step 3: Deploy The Backend On Render
+
+### Preferred setup
+
+Use the Blueprint in [render.yaml](../render.yaml).
+
+Current Blueprint behavior:
+
+- runtime: Python
+- root directory: `backend`
+- plan: `starter`
+- build command:
+
+```bash
+pip install -e . && python -m playwright install chromium
+```
+
+- start command:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+- health check path:
+
+```text
+/health
+```
+
+### Important deployment note
+
+Keep the Render API service at a single instance in the recommended deployment.
+
+Why:
+
+- the scheduler runs inside the API process when `ENABLE_SCHEDULER=true`
+- if you scale horizontally, each instance will start its own scheduler and duplicate jobs
+
+### Required backend env vars
+
+Set these on the Render API service:
+
+#### Core runtime
+
+- `DATABASE_URL`
 - `SEC_USER_AGENT`
-- `OPENAI_API_KEY`
-- `MARKET_DATA_PROVIDER`
-- `FMP_API_KEY`
-- `MAX_FILING_SUMMARIES_PER_DAY`
-- `MAX_NEWS_SUMMARIES_PER_DAY`
-- `MAX_OVERRIDE_SUMMARIES_PER_DAY`
-- `COMPANY_IR_TOP_COMPANY_LIMIT`
-- `CATALYST_LOOKAHEAD_DAYS`
-- `RECENT_CATALYST_DAYS`
-- `OBJECT_STORE_ENDPOINT_URL`
-- `OBJECT_STORE_ACCESS_KEY_ID`
-- `OBJECT_STORE_SECRET_ACCESS_KEY`
-- `OBJECT_STORE_BUCKET`
-- `FRONTEND_BASE_URL`
 - `API_BASE_URL`
+- `FRONTEND_BASE_URL`
 - `CORS_ORIGINS`
-- `ADMIN_API_TOKEN`
 
-Notes:
+Typical values:
 
-- `ENABLE_SCHEDULER` is already set to `true` in the Blueprint.
-- `MARKET_DATA_PROVIDER=fmp` is the intended production default.
-- `ENABLE_BROWSER_PDF_RENDERING` is already set to `true` in the Blueprint.
-- The default summary budgets are intentionally conservative: 3 filings/day, 7 news items/day, plus 2 override slots/day for watchlist or high-signal items.
-- Official company press release sources can be supplied per company via `extra_metadata["ir_feed_url"]`, `["ir_news_page_url"]`, or `["ir_sources"]`, and the scheduler will automatically include prioritized IR sources for watchlist companies and top-ranked names.
-- FDA advisory-calendar events are now synced as a dedicated official catalyst source, so upcoming committee dates are visible even when trade press has not written about them yet.
-- Company and watchlist catalyst cards are derived from recent official news, FDA calendar events, material event filings, and ClinicalTrials.gov milestones, so they do not require a separate paid catalyst provider.
-- The backend build now installs Chromium so HTML SEC filings can be rendered directly to PDF instead of going through the text fallback path.
-- Keep the Render API service at a single instance so scheduled jobs do not run more than once.
-- The backend health check path is `/health`.
-
-## Step 3: Deploy the Frontend on Vercel
-
-Create a Vercel project from this repository with the root directory set to `web`.
-
-Set:
-
-- `NEXT_PUBLIC_API_BASE_URL=https://your-render-api-domain/api/v1`
-
-After Vercel gives you the frontend URL, update the backend service values:
-
+- `API_BASE_URL=https://your-render-api-domain`
 - `FRONTEND_BASE_URL=https://your-vercel-domain`
 - `CORS_ORIGINS=https://your-vercel-domain`
 
-If you later add a custom domain, update all three values accordingly:
+#### OpenAI
 
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `OPENAI_API_BASE`
+
+Recommended defaults:
+
+- `OPENAI_MODEL=gpt-5-mini`
+- `OPENAI_API_BASE=https://api.openai.com/v1`
+
+#### Market data
+
+- `MARKET_DATA_PROVIDER`
+- `FMP_API_KEY`
+- `FMP_BASE_URL`
+
+Recommended defaults:
+
+- `MARKET_DATA_PROVIDER=fmp`
+- `FMP_BASE_URL=https://financialmodelingprep.com/stable`
+
+Optional compatibility fallback:
+
+- `ALPHA_VANTAGE_API_KEY`
+- `ALPHA_VANTAGE_BASE_URL`
+
+#### Object storage
+
+- `OBJECT_STORE_ENDPOINT_URL`
+- `OBJECT_STORE_ACCESS_KEY_ID`
+- `OBJECT_STORE_SECRET_ACCESS_KEY`
+- `OBJECT_STORE_BUCKET`
+- `OBJECT_STORE_REGION`
+
+Recommended R2 default:
+
+- `OBJECT_STORE_REGION=auto`
+
+#### Security / admin
+
+- `ADMIN_API_TOKEN`
+
+#### Scheduler and PDF rendering
+
+- `ENABLE_SCHEDULER=true`
+- `ENABLE_BROWSER_PDF_RENDERING=true`
+- `BROWSER_PDF_TIMEOUT_SECONDS=45`
+
+#### AI budget and prioritization
+
+- `MAX_FILING_SUMMARIES_PER_DAY=3`
+- `MAX_NEWS_SUMMARIES_PER_DAY=7`
+- `MAX_OVERRIDE_SUMMARIES_PER_DAY=2`
+- `MAX_FILING_SUMMARIES_PER_RUN=2`
+- `MAX_NEWS_SUMMARIES_PER_RUN=4`
+- `FILING_SUMMARY_BACKLOG_DAYS=14`
+- `NEWS_SUMMARY_BACKLOG_DAYS=3`
+- `COMPANY_IR_TOP_COMPANY_LIMIT=25`
+- `CATALYST_LOOKAHEAD_DAYS=180`
+- `RECENT_CATALYST_DAYS=90`
+
+#### Digest schedule and general runtime defaults
+
+- `TIMEZONE=America/New_York`
+- `DIGEST_WEEKDAY=mon`
+- `DIGEST_HOUR=8`
+- `DIGEST_MINUTE=0`
+- `SEC_RATE_LIMIT_DELAY_SECONDS=0.2`
+- `SOURCE_FETCH_TIMEOUT_SECONDS=30`
+- `SUMMARY_PROMPT_VERSION=2026-03-28.v2`
+
+### Notes on startup and health
+
+The backend now initializes DB setup and scheduler startup in a background thread so Render can detect the port quickly.
+
+`/health` returns:
+
+- `status`
+- `ready`
+- `db_ready`
+- `scheduler_enabled`
+- `startup_error`
+
+If Render shows the service as up but something still looks wrong, check `/health` first.
+
+## Step 4: Deploy The Frontend On Vercel
+
+Create a Vercel project using `web/` as the root directory.
+
+Set this frontend env var:
+
+```env
+NEXT_PUBLIC_API_BASE_URL=https://your-render-api-domain/api/v1
+```
+
+That is the only required frontend env var today.
+
+After Vercel gives you the public frontend URL, update the backend service:
+
+- `FRONTEND_BASE_URL=https://your-frontend-domain`
+- `CORS_ORIGINS=https://your-frontend-domain`
+
+If you later add a custom domain, update:
+
+- `NEXT_PUBLIC_API_BASE_URL`
 - `FRONTEND_BASE_URL`
 - `CORS_ORIGINS`
-- `NEXT_PUBLIC_API_BASE_URL`
 
-## Step 4: Run the Initial Backfill
+## Step 5: Seed The Initial Data
 
-After the backend is live, open a Render shell for the API service and run:
+The scheduler keeps data current, but it does not perform the initial historical backfill for you.
+
+You should run one manual seed after deployment.
+
+### Fast starter seed
+
+Use `app.bootstrap` for the simplest first pass:
 
 ```bash
 cd /opt/render/project/src/backend
 python -m app.bootstrap --sync-limit 300 --backfill-companies 25 --max-filings-per-company 8
 ```
 
-For a lighter initial pass, use:
+### Focused starter seed
+
+Useful when you want the first experience to be populated with major names only:
 
 ```bash
 cd /opt/render/project/src/backend
-python -m app.bootstrap --focus-tickers PFE,MRK,AMGN,GILD,VRTX,REGN,ABT,MDT,ISRG,DHR --sync-limit 100 --backfill-companies 10 --max-filings-per-company 8
+python -m app.bootstrap \
+  --focus-tickers PFE,MRK,AMGN,GILD,VRTX,REGN,ABT,MDT,ISRG,DHR \
+  --sync-limit 100 \
+  --backfill-companies 10 \
+  --max-filings-per-company 8
 ```
 
-## Step 5: Protect Admin Endpoints
+### Three-year historical seed
 
-Set `ADMIN_API_TOKEN` on the backend. All `/admin/*` routes now require it.
+```bash
+cd /opt/render/project/src/backend
+python -m app.bootstrap --sync-limit 1000 --sync-progress-every 25 --backfill-companies 100 --years-back 3 --skip-digest
+```
 
-You can send it either as:
+Important:
+
+- historical backfills do not automatically summarize every filing
+- that behavior is intentional and keeps OpenAI spend low
+
+## Step 6: Protect The Admin Surface
+
+If `ADMIN_API_TOKEN` is set, all `/admin/*` routes require it.
+
+Supported auth forms:
 
 - `X-Admin-Token: <token>`
 - `Authorization: Bearer <token>`
@@ -122,72 +303,237 @@ You can send it either as:
 Example:
 
 ```bash
-curl -X POST "https://your-render-api-domain/api/v1/admin/ingest-news" \
+curl -X POST "https://your-api-domain/api/v1/admin/ingest-news" \
   -H "X-Admin-Token: $ADMIN_API_TOKEN"
 ```
 
-## Ongoing Operations
+## Scheduled Jobs In Production
 
-The backend service will automatically:
+When `ENABLE_SCHEDULER=true`, the Render API service automatically runs:
 
-- poll SEC filings every 30 minutes
-- ingest news every 6 hours
-- poll FDA advisory-calendar events every 12 hours
-- sync the issuer universe weekly
-- refresh market caps weekly
-- build the weekly digest every Monday at 8:00 AM America/New_York
+- `poll-sec-filings` every 30 minutes
+- `ingest-news` every 6 hours
+- `poll-regulatory-events` every 12 hours
+- `poll-trials` every 7 days
+- `sync-universe` every 7 days
+- `refresh-market-caps` every 7 days
+- `build-weekly-digest` on the configured weekday/time
 
-Manual maintenance commands are available in [backend/app/jobs.py](/Users/christopherhayduk/Desktop/life-sciences-info/backend/app/jobs.py):
+Two important notes:
 
-- `python -m app.jobs sync-universe`
-- `python -m app.jobs refresh-market-caps --all`
-- `python -m app.jobs poll-sec-filings`
-- `python -m app.jobs ingest-news`
-- `python -m app.jobs poll-regulatory-events`
-- `python -m app.jobs summarize-pending filing --limit 5 --include-historical`
-- `python -m app.jobs build-weekly-digest`
-- `python -m app.jobs backfill-company <company_id> --max-filings 8`
-- `python -m app.jobs resummarize filing <item_id>`
-- `python -m app.jobs reprocess-filing <item_id>`
-- `python -m app.jobs reprocess-company-filings <company_id> --limit 25`
-- `python -m app.jobs refresh-all-data --sync-limit 5000 --company-count 250 --years-back 3`
+- market-cap refresh is separate from universe sync
+- trial polling is now part of the default weekly schedule
 
-If you need to overwrite older bad PDFs, parsed sections, and stale market caps in place, use:
+## Current Data Source Behavior In Production
+
+### Filings
+
+The ingestion pipeline currently covers:
+
+- `10-K`, `10-Q`, `20-F`, `40-F`
+- periodic-equivalent `6-K`
+- material `8-K` event categories that matter for life sciences monitoring
+
+### News
+
+The news layer ingests:
+
+- public trade press feeds
+- FDA feeds
+- official company IR / press-release sources
+
+IR source handling supports:
+
+- direct RSS
+- HTML investor-news pages
+- per-company overrides through `extra_metadata["ir_feed_url"]`
+- per-company overrides through `extra_metadata["ir_news_page_url"]`
+- richer multi-source overrides through `extra_metadata["ir_sources"]`
+
+### Regulatory events
+
+The app separately stores FDA advisory-calendar events instead of relying on news coverage alone.
+
+These events show up in:
+
+- the dashboard
+- company timelines
+- watchlist timelines
+- catalyst panels
+
+### Trials
+
+Trial data comes from ClinicalTrials.gov v2 and is linked to companies by sponsor matching.
+
+## Manual Operations You Will Actually Use
+
+All commands below assume:
 
 ```bash
 cd /opt/render/project/src/backend
-python -m app.jobs refresh-all-data --sync-limit 5000 --company-count 250 --years-back 3 --skip-news --skip-digest
 ```
 
-If you only need to refresh company market caps without touching filings, use:
+### Universe and market caps
+
+```bash
+python -m app.jobs sync-universe --limit 1000 --progress-every 50
+python -m app.jobs refresh-market-caps --all --progress-every 50
+```
+
+Use `sync-universe` when you want to refresh the covered company set.
+
+Use `refresh-market-caps` when you want to update market caps and rerank filings/news without touching raw documents.
+
+### Filing backfills and refreshes
+
+```bash
+python -m app.jobs backfill-top-companies --count 25 --years-back 3
+python -m app.jobs backfill-company 123 --years-back 3
+python -m app.jobs refresh-all-data --sync-limit 5000 --company-count 250 --years-back 3 --skip-news --skip-digest
+python -m app.jobs reprocess-filing 456
+python -m app.jobs reprocess-company-filings 123 --limit 25
+```
+
+Use `refresh-all-data` when you want an in-place overwrite of stored filings, parsed text, market-cap ranking, and PDFs.
+
+### News and tagging
+
+```bash
+python -m app.jobs ingest-news
+python -m app.jobs retag-news-companies --all
+```
+
+`retag-news-companies` is the maintenance path for normalizing company links on stored news items and reranking them.
+
+### Regulatory events and trials
+
+```bash
+python -m app.jobs poll-regulatory-events
+python -m app.jobs poll-trials
+```
+
+### Budget-aware backlog work
+
+```bash
+python -m app.jobs summarize-pending filing --limit 5 --include-historical
+python -m app.jobs summarize-pending news --limit 10
+```
+
+This is the manual escape hatch when you want to spend a little AI budget on the pending queue after a historical backfill.
+
+### Weekly digest
+
+```bash
+python -m app.jobs build-weekly-digest
+```
+
+## Recommended Operational Workflow
+
+### Initial launch
+
+1. Deploy backend, Postgres, R2, and frontend.
+2. Confirm `/health` returns `ready=true` and no `startup_error`.
+3. Run a focused or moderate bootstrap.
+4. Optionally create the starter watchlists from the UI or `POST /api/v1/watchlists/starter`.
+5. Let the scheduler take over.
+
+### Ongoing use
+
+In normal operation, you should rarely need more than:
+
+- automatic scheduler runs
+- occasional `refresh-market-caps --all`
+- occasional `retag-news-companies --all`
+- a targeted `backfill-company` when you add or care about a specific name
+- occasional manual summaries for queued items you decide to read
+
+## Cost And Reliability Guidance
+
+### Keep costs low
+
+- leave the default summary budgets in place unless you have a clear reason to raise them
+- prefer targeted backfills over full-universe refreshes
+- use `refresh-market-caps` instead of `refresh-all-data` when you only need reranking
+- avoid bulk `resummarize` unless prompt versions or parsing logic truly changed
+
+### Keep the deployment stable
+
+- keep the Render API on one instance
+- use Chromium-enabled builds for best PDF fidelity
+- use focused or batched refreshes if your instance is memory-constrained
+- the Blueprint starts on Render `starter`; for large `refresh-all-data` runs or mass PDF rerenders, a temporary upgrade to a higher-memory plan can be worth it
+
+### Understand local vs production PDF behavior
+
+- Render Blueprint installs Chromium during build
+- the local backend Docker image does not
+- if browser rendering is unavailable, the app falls back to internal PDF generation
+
+## Troubleshooting
+
+### The service deploys but looks half-ready
+
+Check:
+
+- `GET /health`
+
+Look for:
+
+- `ready`
+- `db_ready`
+- `startup_error`
+
+### Market caps are missing
+
+Run:
 
 ```bash
 cd /opt/render/project/src/backend
 python -m app.jobs refresh-market-caps --all --progress-every 50
 ```
 
-If you want to spend a little budget on queued backlog items after a historical backfill, use:
+If the provider is failing, market-data errors will no longer block SEC or news ingestion.
+
+### PDFs look wrong
+
+Confirm:
+
+- `ENABLE_BROWSER_PDF_RENDERING=true`
+- Chromium was installed during build
+
+Then rerun:
 
 ```bash
 cd /opt/render/project/src/backend
-python -m app.jobs summarize-pending filing --limit 5 --include-historical
-python -m app.jobs summarize-pending news --limit 10
+python -m app.jobs reprocess-filing <filing_id>
 ```
 
-Then optionally refresh news and rebuild the digest:
+### AI usage seems too high
+
+Check:
+
+- automated budgets
+- whether a bulk refresh or resummarize job was run manually
+- `/api/v1/admin/usage-stats`
+
+Historical backfills alone should not automatically summarize everything.
+
+## Local Full-Stack Alternative
+
+If you want a fuller local environment for development or debugging, use:
 
 ```bash
-cd /opt/render/project/src/backend
-python -m app.jobs ingest-news
-python -m app.jobs build-weekly-digest
+docker compose up --build
 ```
 
-## What You Do Not Need For This Deployment
+That local stack includes:
 
-For the default side-project setup, you do not need:
-
-- a separate Dramatiq worker
+- Postgres
 - Redis
-- a separate scheduler service
+- MinIO
+- API
+- worker
+- scheduler
+- web
 
-Those pieces remain in the codebase for future scale-out, but the recommended deployment path avoids them to reduce cost and upkeep.
+This is useful for development, but it is intentionally more complex than the recommended production deployment.

@@ -11,6 +11,7 @@ from app.jobs import (
     run_ingest_news,
     run_poll_regulatory_events,
     run_poll_sec_filings,
+    run_poll_trials,
     run_refresh_market_caps,
     run_sync_universe,
 )
@@ -23,6 +24,13 @@ def build_scheduler(background: bool = False) -> BlockingScheduler | BackgroundS
     scheduler.add_job(run_poll_sec_filings, IntervalTrigger(minutes=30), id="poll_sec_filings", replace_existing=True)
     scheduler.add_job(run_ingest_news, IntervalTrigger(hours=6), id="ingest_news", replace_existing=True)
     scheduler.add_job(run_poll_regulatory_events, IntervalTrigger(hours=12), id="poll_regulatory_events", replace_existing=True)
+    scheduler.add_job(
+        run_poll_trials,
+        IntervalTrigger(days=7),
+        kwargs={"limit": None},
+        id="poll_trials",
+        replace_existing=True,
+    )
     scheduler.add_job(run_sync_universe, IntervalTrigger(days=7), id="sync_universe", replace_existing=True)
     scheduler.add_job(
         run_refresh_market_caps,

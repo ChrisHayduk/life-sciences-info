@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal, init_db
 from app.models import Company
+from app.services.clinical_trials import ClinicalTrialsService
 from app.services.digests import DigestService
 from app.services.filings import FilingService
 from app.services.market_caps import MarketCapService
@@ -154,6 +155,18 @@ def run_poll_regulatory_events(*, limit: int | None = None) -> dict[str, int]:
         "inserted": int(result["inserted"]),
         "updated": int(result["updated"]),
         "tagged": int(result["tagged"]),
+    }
+
+
+def run_poll_trials(*, limit: int | None = None) -> dict[str, int]:
+    def _run(session):
+        return ClinicalTrialsService(session).poll_all_companies(limit=limit)
+
+    result = _with_session(_run)
+    return {
+        "companies_polled": int(result["companies_polled"]),
+        "new_trials": int(result["new_trials"]),
+        "updated_trials": int(result["updated_trials"]),
     }
 
 
@@ -391,6 +404,11 @@ def main() -> None:
         help="Pull official FDA advisory-calendar events and tag covered companies.",
     )
     poll_regulatory_parser.add_argument("--limit", type=int, default=None)
+    poll_trials_parser = subparsers.add_parser(
+        "poll-trials",
+        help="Pull ClinicalTrials.gov data for covered companies.",
+    )
+    poll_trials_parser.add_argument("--limit", type=int, default=None)
     retag_news_parser = subparsers.add_parser(
         "retag-news-companies",
         help="Normalize explicit company tags for stored news items and rerank affected stories.",
@@ -514,6 +532,14 @@ def main() -> None:
         print(
             f"Synced {result['inserted']} new and {result['updated']} updated FDA events; "
             f"{result['tagged']} tagged to covered companies",
+            flush=True,
+        )
+        return
+    if args.command == "poll-trials":
+        result = run_poll_trials(limit=args.limit)
+        print(
+            f"Polled {result['companies_polled']} companies; "
+            f"{result['new_trials']} new trials, {result['updated_trials']} updated",
             flush=True,
         )
         return

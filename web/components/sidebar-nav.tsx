@@ -7,11 +7,11 @@ import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
+  { href: "/watchlists", label: "Watchlists", icon: Eye },
   { href: "/companies", label: "Companies", icon: Building2 },
   { href: "/news", label: "News", icon: Newspaper },
   { href: "/trials", label: "Trials", icon: FlaskConical },
   { href: "/digests", label: "Digests", icon: BookOpen },
-  { href: "/watchlists", label: "Watchlists", icon: Eye },
 ];
 
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {

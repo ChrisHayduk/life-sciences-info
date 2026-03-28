@@ -56,10 +56,14 @@ class Settings(BaseSettings):
     enable_scheduler: bool = False
     enable_browser_pdf_rendering: bool = True
     browser_pdf_timeout_seconds: float = 45.0
-    max_filing_summaries_per_day: int = 12
-    max_news_summaries_per_day: int = 24
-    max_filing_summaries_per_run: int = 3
-    max_news_summaries_per_run: int = 8
+    max_filing_summaries_per_day: int = 3
+    max_news_summaries_per_day: int = 7
+    max_override_summaries_per_day: int = 2
+    max_filing_summaries_per_run: int = 2
+    max_news_summaries_per_run: int = 4
+    company_ir_top_company_limit: int = 25
+    catalyst_lookahead_days: int = 180
+    recent_catalyst_days: int = 90
     news_summary_backlog_days: int = 3
     filing_summary_backlog_days: int = 14
     timezone: str = "America/New_York"
@@ -68,7 +72,7 @@ class Settings(BaseSettings):
     digest_minute: int = 0
     sec_rate_limit_delay_seconds: float = 0.2
     source_fetch_timeout_seconds: float = 30.0
-    summary_prompt_version: str = "2026-03-24.v1"
+    summary_prompt_version: str = "2026-03-28.v2"
 
     @field_validator("cors_origins", mode="before")
     @classmethod

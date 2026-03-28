@@ -1,7 +1,9 @@
-import { EmptyPanel, NewsCard, SectionHeader } from "@/components/cards";
+import { EmptyPanel, FilingCard, SectionHeader } from "@/components/cards";
 import { api } from "@/lib/api";
 
-export default async function NewsPage({
+const FORM_OPTIONS = ["10-K", "20-F", "40-F", "10-Q", "8-K", "6-K"];
+
+export default async function FilingsPage({
   searchParams,
 }: {
   searchParams: Promise<Record<string, string | undefined>>;
@@ -12,10 +14,10 @@ export default async function NewsPage({
   const offset = (page - 1) * limit;
 
   const result = await api
-    .news({
+    .filings({
       limit,
       offset,
-      source_name: params.source,
+      form_type: params.form_type,
       search: params.q,
       sort_by: params.sort,
       recent_days: Number(params.recent_days) || undefined,
@@ -26,8 +28,8 @@ export default async function NewsPage({
   const totalPages = Math.ceil(result.total / limit);
 
   function buildPageUrl(newPage: number) {
-    const parts = [`/news?page=${newPage}`];
-    if (params.source) parts.push(`source=${encodeURIComponent(params.source)}`);
+    const parts = [`/filings?page=${newPage}`];
+    if (params.form_type) parts.push(`form_type=${encodeURIComponent(params.form_type)}`);
     if (params.q) parts.push(`q=${encodeURIComponent(params.q)}`);
     if (params.sort_mode) parts.push(`sort_mode=${encodeURIComponent(params.sort_mode)}`);
     if (params.recent_days) parts.push(`recent_days=${encodeURIComponent(params.recent_days)}`);
@@ -38,11 +40,11 @@ export default async function NewsPage({
     <>
       <section className="rounded-2xl border border-border/50 bg-gradient-to-br from-card to-secondary/60 p-7 shadow-lg">
         <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
-          News Feed
+          Filing Archive
         </span>
-        <h2 className="text-2xl mt-1">Important life sciences headlines</h2>
+        <h2 className="text-2xl mt-1">Ranked SEC disclosures</h2>
         <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
-          Public trade press and regulator feeds are grouped, tagged, and ranked so you can scan events without paying for a premium news terminal.
+          Browse the tracked universe of annual, quarterly, and material event filings with the same freshness and importance controls used on the dashboard.
         </p>
       </section>
 
@@ -54,26 +56,25 @@ export default async function NewsPage({
               id="q"
               name="q"
               type="text"
-              placeholder="Search title or article text..."
+              placeholder="Search company or filing title..."
               defaultValue={params.q ?? ""}
               className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
             />
           </div>
           <div className="flex flex-col gap-1">
-            <label htmlFor="source" className="text-xs font-medium text-muted-foreground">Source</label>
+            <label htmlFor="form_type" className="text-xs font-medium text-muted-foreground">Form type</label>
             <select
-              id="source"
-              name="source"
-              defaultValue={params.source ?? ""}
+              id="form_type"
+              name="form_type"
+              defaultValue={params.form_type ?? ""}
               className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
             >
-              <option value="">All sources</option>
-              <option value="Fierce Pharma">Fierce Pharma</option>
-              <option value="Fierce Biotech">Fierce Biotech</option>
-              <option value="FDA Press Releases">FDA Press Releases</option>
-              <option value="FDA Drug Approvals">FDA Drug Approvals</option>
-              <option value="STAT News">STAT News</option>
-              <option value="Endpoints News">Endpoints News</option>
+              <option value="">All forms</option>
+              {FORM_OPTIONS.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
             </select>
           </div>
           <div className="flex flex-col gap-1">
@@ -86,7 +87,6 @@ export default async function NewsPage({
             >
               <option value="importance">Most important</option>
               <option value="freshness">Newest</option>
-              <option value="personal">Personal relevance</option>
             </select>
           </div>
           <div className="flex flex-col gap-1">
@@ -94,12 +94,12 @@ export default async function NewsPage({
             <select
               id="recent_days"
               name="recent_days"
-              defaultValue={params.recent_days ?? "14"}
+              defaultValue={params.recent_days ?? "90"}
               className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
             >
-              <option value="7">Last 7 days</option>
-              <option value="14">Last 14 days</option>
               <option value="30">Last 30 days</option>
+              <option value="90">Last 90 days</option>
+              <option value="365">Last 12 months</option>
               <option value="">All available</option>
             </select>
           </div>
@@ -115,14 +115,14 @@ export default async function NewsPage({
       <section>
         <SectionHeader
           eyebrow="Archive"
-          title={`${result.total} ranked stories`}
-          description="Official sources and deduped event groups are favored so the feed stays readable and efficient."
+          title={`${result.total} filings`}
+          description="This view keeps the dashboard’s ranking logic but makes it easier to search and filter the full filing set."
         />
         <div className="grid gap-4 md:grid-cols-2">
           {result.items.length ? (
-            result.items.map((item) => <NewsCard key={item.id} item={item} />)
+            result.items.map((item) => <FilingCard key={item.id} filing={item} />)
           ) : (
-            <EmptyPanel title="No news available" body="Run the feed ingestion job to populate the archive." />
+            <EmptyPanel title="No filings available" body="Run the filing backfill or polling jobs to populate the archive." />
           )}
         </div>
         {totalPages > 1 && (

@@ -36,6 +36,18 @@ class SummaryPayload(BaseModel):
     score_explanation: str = ""
 
 
+class SummaryBudgetSnapshot(BaseModel):
+    used: int = 0
+    limit: int = 0
+    remaining: int = 0
+
+
+class SummaryBudgetOverview(BaseModel):
+    filing: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
+    news: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
+    override: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
+
+
 class CompanyResponse(BaseModel):
     id: int
     cik: str
@@ -68,6 +80,13 @@ class FilingListItem(BaseModel):
     composite_score: float
     score_explanation: dict[str, Any] = Field(default_factory=dict)
     summary_status: str = "pending"
+    summary_tier: str = "no_ai"
+    source_type: str = "official_filing"
+    event_type: str | None = None
+    priority_reason: str = ""
+    is_official_source: bool = True
+    dedupe_group_id: str | None = None
+    freshness_bucket: str = "stale"
     summary: str = ""
     original_document_url: str
     pdf_download_url: str | None = None
@@ -103,6 +122,13 @@ class NewsItemResponse(BaseModel):
     composite_score: float
     score_explanation: dict[str, Any] = Field(default_factory=dict)
     summary_status: str = "pending"
+    summary_tier: str = "no_ai"
+    source_type: str = "trade_press"
+    event_type: str | None = None
+    priority_reason: str = ""
+    is_official_source: bool = False
+    dedupe_group_id: str | None = None
+    freshness_bucket: str = "stale"
     summary: str = ""
     key_takeaways: list[str] = Field(default_factory=list)
 
@@ -121,6 +147,14 @@ class CompanyDetailResponse(CompanyResponse):
     news_count: int = 0
     recent_filings: list[FilingListItem] = Field(default_factory=list)
     recent_news: list[NewsItemResponse] = Field(default_factory=list)
+    timeline: list[TimelineEvent] = Field(default_factory=list)
+    latest_filing: FilingListItem | None = None
+    latest_news: NewsItemResponse | None = None
+    latest_trial: dict[str, Any] | None = None
+    business_summary: str = ""
+    change_summary: list[str] = Field(default_factory=list)
+    catalyst_summary: list[str] = Field(default_factory=list)
+    catalysts: list[TimelineEvent] = Field(default_factory=list)
     trend: CompanyTrend | dict = Field(default_factory=dict)
     pipeline: dict = Field(default_factory=dict)
 
@@ -137,11 +171,69 @@ class DigestResponse(BaseModel):
 
 
 class DashboardResponse(BaseModel):
+    latest_filings: list[FilingListItem] = Field(default_factory=list)
+    latest_news: list[NewsItemResponse] = Field(default_factory=list)
+    important_filings: list[FilingListItem] = Field(default_factory=list)
+    important_news: list[NewsItemResponse] = Field(default_factory=list)
     top_filings: list[FilingListItem] = Field(default_factory=list)
     top_news: list[NewsItemResponse] = Field(default_factory=list)
+    watchlist_highlights: list[WatchlistHighlight] = Field(default_factory=list)
+    upcoming_regulatory_events: list[TimelineEvent] = Field(default_factory=list)
     recent_trials: list[dict[str, Any]] = Field(default_factory=list)
     latest_digest: DigestResponse | None = None
     counts: dict[str, int] = Field(default_factory=dict)
+    ai_budget: SummaryBudgetOverview = Field(default_factory=SummaryBudgetOverview)
+    queue_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class TimelineEvent(BaseModel):
+    id: str
+    item_type: str
+    item_id: int
+    occurred_at: datetime
+    title: str
+    summary: str = ""
+    company_ids: list[int] = Field(default_factory=list)
+    company_names: list[str] = Field(default_factory=list)
+    href: str | None = None
+    external_url: str | None = None
+    source_type: str = ""
+    event_type: str | None = None
+    priority_reason: str = ""
+    summary_tier: str = "no_ai"
+    is_official_source: bool = False
+    freshness_bucket: str = "stale"
+    composite_score: float = 0.0
+    tags: list[str] = Field(default_factory=list)
+
+
+class WatchlistResponse(BaseModel):
+    id: int
+    name: str
+    description: str | None = None
+    preset_key: str | None = None
+    company_ids: list[int] = Field(default_factory=list)
+    form_types: list[str] = Field(default_factory=list)
+    topic_tags: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class WatchlistHighlight(BaseModel):
+    watchlist_id: int
+    watchlist_name: str
+    watchlist_description: str | None = None
+    highlights: list[TimelineEvent] = Field(default_factory=list)
+
+
+class WatchlistBriefingResponse(BaseModel):
+    watchlist: WatchlistResponse
+    filings: list[FilingListItem] = Field(default_factory=list)
+    news: list[NewsItemResponse] = Field(default_factory=list)
+    trials: list[dict[str, Any]] = Field(default_factory=list)
+    catalysts: list[TimelineEvent] = Field(default_factory=list)
+    highlights: list[TimelineEvent] = Field(default_factory=list)
+    timeline: list[TimelineEvent] = Field(default_factory=list)
 
 
 class AdminActionResponse(BaseModel):

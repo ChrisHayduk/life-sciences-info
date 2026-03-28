@@ -60,6 +60,8 @@ class SummaryBudgetService:
             return self.settings.max_filing_summaries_per_day
         if kind == "news":
             return self.settings.max_news_summaries_per_day
+        if kind == "override":
+            return self.settings.max_override_summaries_per_day
         if kind == "diff":
             return 6  # Filing-over-filing diff analyses per day
         if kind == "digest":

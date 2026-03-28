@@ -20,6 +20,13 @@ export type FilingListItem = {
   composite_score: number;
   score_explanation: ScoreExplanation;
   summary_status: string;
+  summary_tier: string;
+  source_type: string;
+  event_type?: string | null;
+  priority_reason: string;
+  is_official_source: boolean;
+  dedupe_group_id?: string | null;
+  freshness_bucket: string;
   summary: string;
   original_document_url: string;
   pdf_download_url?: string | null;
@@ -104,6 +111,14 @@ export type CompanyDetail = Company & {
   news_count: number;
   recent_filings: FilingListItem[];
   recent_news: NewsItem[];
+  timeline: TimelineEvent[];
+  latest_filing?: FilingListItem | null;
+  latest_news?: NewsItem | null;
+  latest_trial?: ClinicalTrial | null;
+  business_summary: string;
+  change_summary: string[];
+  catalyst_summary: string[];
+  catalysts: TimelineEvent[];
   trend?: CompanyTrend;
   pipeline?: Record<string, ClinicalTrial[]>;
 };
@@ -123,8 +138,48 @@ export type NewsItem = {
   composite_score: number;
   score_explanation: ScoreExplanation;
   summary_status: string;
+  summary_tier: string;
+  source_type: string;
+  event_type?: string | null;
+  priority_reason: string;
+  is_official_source: boolean;
+  dedupe_group_id?: string | null;
+  freshness_bucket: string;
   summary: string;
   key_takeaways: string[];
+};
+
+export type TimelineEvent = {
+  id: string;
+  item_type: string;
+  item_id: number;
+  occurred_at: string;
+  title: string;
+  summary: string;
+  company_ids: number[];
+  company_names: string[];
+  href?: string | null;
+  external_url?: string | null;
+  source_type: string;
+  event_type?: string | null;
+  priority_reason: string;
+  summary_tier: string;
+  is_official_source: boolean;
+  freshness_bucket: string;
+  composite_score: number;
+  tags: string[];
+};
+
+export type SummaryBudgetSnapshot = {
+  used: number;
+  limit: number;
+  remaining: number;
+};
+
+export type SummaryBudgetOverview = {
+  filing: SummaryBudgetSnapshot;
+  news: SummaryBudgetSnapshot;
+  override: SummaryBudgetSnapshot;
 };
 
 export type Digest = {
@@ -142,11 +197,19 @@ export type Digest = {
 };
 
 export type DashboardData = {
+  latest_filings: FilingListItem[];
+  latest_news: NewsItem[];
+  important_filings: FilingListItem[];
+  important_news: NewsItem[];
   top_filings: FilingListItem[];
   top_news: NewsItem[];
+  watchlist_highlights: WatchlistHighlight[];
+  upcoming_regulatory_events: TimelineEvent[];
   recent_trials: ClinicalTrial[];
   latest_digest?: Digest | null;
   counts: Record<string, number>;
+  ai_budget: SummaryBudgetOverview;
+  queue_counts: Record<string, number>;
 };
 
 export type PaginatedResponse<T> = {
@@ -163,6 +226,9 @@ export type FilingFilters = {
   form_type?: string;
   search?: string;
   sort_by?: string;
+  recent_days?: number;
+  watchlist_id?: number;
+  sort_mode?: string;
 };
 
 export type NewsFilters = {
@@ -171,11 +237,16 @@ export type NewsFilters = {
   source_name?: string;
   search?: string;
   sort_by?: string;
+  recent_days?: number;
+  watchlist_id?: number;
+  sort_mode?: string;
 };
 
 export type Watchlist = {
   id: number;
   name: string;
+  description?: string | null;
+  preset_key?: string | null;
   company_ids: number[];
   form_types: string[];
   topic_tags: string[];
@@ -183,10 +254,21 @@ export type Watchlist = {
   updated_at: string;
 };
 
+export type WatchlistHighlight = {
+  watchlist_id: number;
+  watchlist_name: string;
+  watchlist_description?: string | null;
+  highlights: TimelineEvent[];
+};
+
 export type WatchlistFeed = {
   watchlist: Watchlist;
   filings: FilingListItem[];
   news: NewsItem[];
+  trials: ClinicalTrial[];
+  catalysts: TimelineEvent[];
+  highlights: TimelineEvent[];
+  timeline: TimelineEvent[];
 };
 
 export type TrialFilters = {
@@ -232,6 +314,8 @@ export const api = {
       60
     ),
   filing: (id: string) => fetchJSON<FilingDetail>(`/filings/${id}`),
+  companyTimeline: (id: string, limit?: number) =>
+    fetchJSON<TimelineEvent[]>(`/companies/${id}/timeline${buildQuery({ limit })}`),
   news: (filters?: NewsFilters) =>
     fetchJSON<PaginatedResponse<NewsItem>>(
       `/news${buildQuery(filters ?? {})}`,
@@ -245,18 +329,22 @@ export const api = {
     ),
   watchlists: () => fetchJSON<Watchlist[]>("/watchlists", 0),
   watchlist: (id: string) => fetchJSON<Watchlist>(`/watchlists/${id}`),
+  watchlistBriefing: (id: string, limit?: number) =>
+    fetchJSON<WatchlistFeed>(`/watchlists/${id}/briefing${buildQuery({ limit })}`, 0),
   watchlistFeed: (id: string, limit?: number) =>
     fetchJSON<WatchlistFeed>(`/watchlists/${id}/feed${buildQuery({ limit })}`, 0),
 };
 
 export async function createWatchlist(params: {
   name: string;
+  description?: string;
   company_ids?: number[];
   form_types?: string[];
   topic_tags?: string[];
 }): Promise<Watchlist> {
   const query = buildQuery({
     name: params.name,
+    description: params.description,
     company_ids: params.company_ids?.join(","),
     form_types: params.form_types?.join(","),
     topic_tags: params.topic_tags?.join(","),
@@ -269,12 +357,49 @@ export async function createWatchlist(params: {
   return response.json() as Promise<Watchlist>;
 }
 
+export async function createStarterWatchlists(): Promise<Watchlist[]> {
+  const response = await fetch(`${API_BASE}/watchlists/starter`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Failed to create starter watchlists: ${response.status}`);
+  return response.json() as Promise<Watchlist[]>;
+}
+
+export async function addCompaniesToWatchlist(watchlistId: number, companyIds: number[]): Promise<Watchlist> {
+  const response = await fetch(
+    `${API_BASE}/watchlists/${watchlistId}/companies${buildQuery({ company_ids: companyIds.join(",") })}`,
+    {
+      method: "POST",
+      cache: "no-store",
+    }
+  );
+  if (!response.ok) throw new Error(`Failed to update watchlist: ${response.status}`);
+  return response.json() as Promise<Watchlist>;
+}
+
 export async function deleteWatchlist(id: number): Promise<void> {
   const response = await fetch(`${API_BASE}/watchlists/${id}`, {
     method: "DELETE",
     cache: "no-store",
   });
   if (!response.ok) throw new Error(`Failed to delete watchlist: ${response.status}`);
+}
+
+export async function summarizeFiling(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/filings/${id}/summarize`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Failed to summarize filing: ${response.status}`);
+}
+
+export async function summarizeNews(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/news/${id}/summarize`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Failed to summarize news: ${response.status}`);
 }
 
 export function formatCurrency(value?: number | null): string {

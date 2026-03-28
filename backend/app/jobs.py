@@ -6,12 +6,11 @@ from sqlalchemy import select
 
 from app.db import SessionLocal, init_db
 from app.models import Company
-from app.models import Filing as FilingModel
-from app.models import NewsItem as NewsItemModel
 from app.services.digests import DigestService
 from app.services.filings import FilingService
 from app.services.market_caps import MarketCapService
 from app.services.news import NewsService
+from app.services.regulatory_events import RegulatoryEventService
 from app.services.universe import UniverseService
 
 
@@ -145,6 +144,19 @@ def run_ingest_news() -> dict[str, int]:
     return _with_session(_run)
 
 
+def run_poll_regulatory_events(*, limit: int | None = None) -> dict[str, int]:
+    def _run(session):
+        return RegulatoryEventService(session).poll_fda_advisory_calendar(limit=limit)
+
+    result = _with_session(_run)
+    return {
+        "scanned": int(result["scanned"]),
+        "inserted": int(result["inserted"]),
+        "updated": int(result["updated"]),
+        "tagged": int(result["tagged"]),
+    }
+
+
 def run_retag_news_companies(
     *,
     limit: int | None = None,
@@ -199,26 +211,13 @@ def run_summarize_pending(
 def run_resummarize_item(kind: str, item_id: int) -> int:
     def _run(session):
         if kind == "filing":
-            filing_service = FilingService(session)
-            filing = session.get(FilingModel, item_id)
-            if not filing:
-                raise ValueError(f"Unknown filing id={item_id}")
-            prior = filing_service._prior_comparable_filing(filing.company_id, filing)
-            filing_service._apply_summary(filing, filing.company, prior_filing=prior, trigger="manual")
-            session.commit()
+            FilingService(session).summarize_item(item_id, consume_override_budget=False, force=True)
             return item_id
 
         if kind != "news":
             raise ValueError("kind must be 'filing' or 'news'")
 
-        news_service = NewsService(session)
-        news_item = session.get(NewsItemModel, item_id)
-        if not news_item:
-            raise ValueError(f"Unknown news id={item_id}")
-        news_service._apply_summary(news_item, trigger="manual")
-        companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-        news_service._apply_scores(news_item, companies)
-        session.commit()
+        NewsService(session).summarize_item(item_id, consume_override_budget=False, force=True)
         return item_id
 
     return _with_session(_run)
@@ -262,6 +261,13 @@ def run_refresh_all_data(
         focus_tickers=focus_tickers,
         progress_callback=lambda message: print(message, flush=True),
         progress_every=progress_every,
+    )
+    regulatory_result = run_poll_regulatory_events()
+    print(
+        f"Regulatory event sync complete: {regulatory_result['inserted']} new, "
+        f"{regulatory_result['updated']} updated, "
+        f"{regulatory_result['tagged']} tagged to covered companies",
+        flush=True,
     )
 
     def _select(session):
@@ -331,6 +337,7 @@ def run_refresh_all_data(
         "failed_market_caps": int(market_cap_result["failed"] or 0),
         "reranked_filings": int(market_cap_result["reranked_filings"] or 0),
         "reranked_news": int(market_cap_result["reranked_news"] or 0),
+        "regulatory_events": int(regulatory_result["inserted"] or 0) + int(regulatory_result["updated"] or 0),
         "reprocessed_filings": reprocessed_total,
         "new_filings": backfilled_total,
         "news_items": news_count,
@@ -379,6 +386,11 @@ def main() -> None:
 
     subparsers.add_parser("poll-sec-filings", help="Poll covered companies for newly filed periodic reports.")
     subparsers.add_parser("ingest-news", help="Pull configured news feeds and summarize new items.")
+    poll_regulatory_parser = subparsers.add_parser(
+        "poll-regulatory-events",
+        help="Pull official FDA advisory-calendar events and tag covered companies.",
+    )
+    poll_regulatory_parser.add_argument("--limit", type=int, default=None)
     retag_news_parser = subparsers.add_parser(
         "retag-news-companies",
         help="Normalize explicit company tags for stored news items and rerank affected stories.",
@@ -494,6 +506,14 @@ def main() -> None:
             f"Ingested {result['new_items']} news items, "
             f"summarized {result['summarized']}, "
             f"{result['remaining_daily_budget']} daily budget remaining",
+            flush=True,
+        )
+        return
+    if args.command == "poll-regulatory-events":
+        result = run_poll_regulatory_events(limit=args.limit)
+        print(
+            f"Synced {result['inserted']} new and {result['updated']} updated FDA events; "
+            f"{result['tagged']} tagged to covered companies",
             flush=True,
         )
         return

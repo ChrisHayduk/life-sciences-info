@@ -2,11 +2,19 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Eye, Plus, Trash2 } from "lucide-react";
+import { Eye, Plus, Sparkles, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { SectionHeader, EmptyPanel } from "@/components/cards";
-import { api, Company, Watchlist, createWatchlist, deleteWatchlist } from "@/lib/api";
+import {
+  api,
+  Company,
+  Watchlist,
+  createStarterWatchlists,
+  createWatchlist,
+  deleteWatchlist,
+} from "@/lib/api";
 
 export default function WatchlistsPage() {
   const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
@@ -14,6 +22,7 @@ export default function WatchlistsPage() {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newDescription, setNewDescription] = useState("");
   const [selectedCompanyIds, setSelectedCompanyIds] = useState<number[]>([]);
   const [creating, setCreating] = useState(false);
 
@@ -34,14 +43,35 @@ export default function WatchlistsPage() {
     try {
       const wl = await createWatchlist({
         name: newName.trim(),
+        description: newDescription.trim() || undefined,
         company_ids: selectedCompanyIds,
       });
       setWatchlists((prev) => [wl, ...prev]);
       setNewName("");
+      setNewDescription("");
       setSelectedCompanyIds([]);
       setShowCreate(false);
+      toast.success("Watchlist created");
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleCreateStarters() {
+    try {
+      const starters = await createStarterWatchlists();
+      setWatchlists((prev) => {
+        const merged = [...starters, ...prev];
+        const seen = new Set<number>();
+        return merged.filter((item) => {
+          if (seen.has(item.id)) return false;
+          seen.add(item.id);
+          return true;
+        });
+      });
+      toast.success("Starter watchlists ready");
+    } catch {
+      toast.error("Failed to create starter watchlists");
     }
   }
 
@@ -70,9 +100,9 @@ export default function WatchlistsPage() {
         <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
           Watchlists
         </span>
-        <h2 className="text-2xl mt-1">Custom company tracking</h2>
+        <h2 className="text-2xl mt-1">Personal follow-up workspaces</h2>
         <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
-          Create watchlists to group companies and get a filtered feed of their filings and news.
+          Watchlists are the main handoff from the market-wide dashboard into the names you want to keep up with.
         </p>
       </section>
 
@@ -80,32 +110,55 @@ export default function WatchlistsPage() {
         <SectionHeader
           eyebrow="Your Watchlists"
           title={`${watchlists.length} watchlist${watchlists.length === 1 ? "" : "s"}`}
-          description="Each watchlist generates a combined feed of filings and news for its tracked companies."
+          description="Each watchlist now has a briefing view with grouped filings, news, trial updates, and a merged timeline."
           actions={
-            <button
-              onClick={() => setShowCreate(!showCreate)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-            >
-              <Plus className="size-3.5" /> New watchlist
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={handleCreateStarters}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent transition-colors"
+              >
+                <Sparkles className="size-3.5" /> Starter watchlists
+              </button>
+              <button
+                onClick={() => setShowCreate(!showCreate)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
+              >
+                <Plus className="size-3.5" /> New watchlist
+              </button>
+            </div>
           }
         />
 
         {showCreate && (
           <Card className="border-border/50 mb-4">
             <CardContent className="p-5 space-y-4">
-              <div className="flex flex-col gap-1">
-                <label htmlFor="wl-name" className="text-xs font-medium text-muted-foreground">
-                  Watchlist name
-                </label>
-                <input
-                  id="wl-name"
-                  type="text"
-                  value={newName}
-                  onChange={(e) => setNewName(e.target.value)}
-                  placeholder="e.g. Large Cap Oncology"
-                  className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
-                />
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="wl-name" className="text-xs font-medium text-muted-foreground">
+                    Watchlist name
+                  </label>
+                  <input
+                    id="wl-name"
+                    type="text"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    placeholder="e.g. Oncology leaders"
+                    className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="wl-description" className="text-xs font-medium text-muted-foreground">
+                    Description
+                  </label>
+                  <input
+                    id="wl-description"
+                    type="text"
+                    value={newDescription}
+                    onChange={(e) => setNewDescription(e.target.value)}
+                    placeholder="Why this watchlist exists"
+                    className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm"
+                  />
+                </div>
               </div>
               <div className="flex flex-col gap-1">
                 <span className="text-xs font-medium text-muted-foreground">
@@ -156,7 +209,12 @@ export default function WatchlistsPage() {
               <Card key={wl.id} className="border-border/50">
                 <CardHeader className="p-5 pb-3">
                   <div className="flex items-center justify-between">
-                    <h3 className="text-base font-semibold">{wl.name}</h3>
+                    <div>
+                      <h3 className="text-base font-semibold">{wl.name}</h3>
+                      {wl.description ? (
+                        <p className="text-sm text-muted-foreground mt-1">{wl.description}</p>
+                      ) : null}
+                    </div>
                     <button
                       onClick={() => handleDelete(wl.id)}
                       className="text-muted-foreground hover:text-destructive transition-colors"
@@ -171,22 +229,17 @@ export default function WatchlistsPage() {
                     <Badge variant="secondary" className="text-xs">
                       {wl.company_ids.length} compan{wl.company_ids.length === 1 ? "y" : "ies"}
                     </Badge>
-                    {wl.form_types.length > 0 && (
-                      <Badge variant="outline" className="text-xs">
-                        {wl.form_types.join(", ")}
+                    {wl.preset_key ? (
+                      <Badge variant="outline" className="text-xs font-normal">
+                        preset
                       </Badge>
-                    )}
-                    {wl.topic_tags.length > 0 && (
-                      <Badge variant="outline" className="text-xs">
-                        {wl.topic_tags.join(", ")}
-                      </Badge>
-                    )}
+                    ) : null}
                   </div>
                   <Link
                     href={`/watchlists/${wl.id}`}
                     className="inline-flex items-center gap-1 text-sm font-semibold text-primary hover:text-primary/80"
                   >
-                    <Eye className="size-3.5" /> View feed
+                    <Eye className="size-3.5" /> View briefing
                   </Link>
                 </CardContent>
               </Card>
@@ -194,7 +247,7 @@ export default function WatchlistsPage() {
           ) : (
             <EmptyPanel
               title="No watchlists yet"
-              body="Create a watchlist to start tracking specific companies and their filings and news."
+              body="Create a watchlist or generate the starter set to turn the dashboard into a personal workflow."
             />
           )}
         </div>

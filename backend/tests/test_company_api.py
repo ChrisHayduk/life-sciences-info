@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.models import Filing, NewsItem
+from datetime import date, timedelta
+
+from app.models import ClinicalTrial, Filing, NewsItem, RegulatoryEvent, Watchlist
 
 
 def test_company_list_and_detail_include_labels_filings_and_news(client, db_session, company):
@@ -245,3 +247,122 @@ def test_dashboard_top_filings_remain_globally_ranked(client, db_session, compan
 
     assert response.status_code == 200
     assert payload["top_filings"][0]["id"] == highest_score.id
+
+
+def test_company_detail_and_watchlist_briefing_include_structured_catalysts(client, db_session, company):
+    filing = Filing(
+        company_id=company.id,
+        accession_number="catalyst-filing",
+        form_type="8-K",
+        normalized_form_type="8-K",
+        title="Apex Bio announces collaboration",
+        filed_at=datetime.now(timezone.utc) - timedelta(days=2),
+        filing_url="https://example.com/catalyst-index",
+        original_document_url="https://example.com/catalyst-doc",
+        summary_status="pending",
+        summary_tier="no_ai",
+        source_type="official_filing",
+        event_type="material-agreement",
+        priority_reason="material agreement event",
+        is_official_source=True,
+        freshness_bucket="last_7d",
+        composite_score=78.0,
+        importance_score=55.0,
+        market_cap_score=80.0,
+        impact_score=70.0,
+        score_explanation={"components": {"recency": 80}, "confidence": "high"},
+    )
+    news = NewsItem(
+        source_name="Apex Bio Investor Relations",
+        source_weight=0.98,
+        feed_url="https://ir.example.com/rss",
+        title="Apex Bio reports positive Phase 3 data",
+        canonical_url="https://ir.example.com/phase-3-data",
+        excerpt="Positive Phase 3 data",
+        content_text="Official company press release describing positive Phase 3 data.",
+        published_at=datetime.now(timezone.utc) - timedelta(days=1),
+        article_hash="catalyst-news",
+        mentioned_companies=["Apex Bio"],
+        company_tag_ids=[company.id],
+        topic_tags=["company-pr", "clinical"],
+        summary_status="pending",
+        summary_tier="no_ai",
+        source_type="official_company_pr",
+        event_type="clinical-data",
+        priority_reason="official source, clinical data coverage",
+        is_official_source=True,
+        freshness_bucket="last_24h",
+        composite_score=88.0,
+        importance_score=70.0,
+        market_cap_score=80.0,
+        score_explanation={"components": {"importance": 70}, "confidence": "high"},
+    )
+    trial = ClinicalTrial(
+        nct_id="NCT00000001",
+        company_id=company.id,
+        title="Apex Bio pivotal study",
+        phase="Phase 3",
+        status="Recruiting",
+        sponsor="Apex Bio",
+        primary_completion_date=date.today() + timedelta(days=45),
+        last_update_date=date.today(),
+    )
+    watchlist = Watchlist(name="Tracked names", company_ids=[company.id])
+    db_session.add_all([filing, news, trial, watchlist])
+    db_session.commit()
+
+    company_response = client.get(f"/api/v1/companies/{company.id}")
+    company_payload = company_response.json()
+
+    assert company_response.status_code == 200
+    assert company_payload["catalysts"]
+    assert {item["item_type"] for item in company_payload["catalysts"]} >= {"news", "trial"}
+
+    watchlist_response = client.get(f"/api/v1/watchlists/{watchlist.id}/briefing")
+    watchlist_payload = watchlist_response.json()
+
+    assert watchlist_response.status_code == 200
+    assert watchlist_payload["catalysts"]
+    assert any(item["item_type"] == "trial" for item in watchlist_payload["catalysts"])
+
+
+def test_company_and_dashboard_surfaces_include_regulatory_events(client, db_session, company):
+    event = RegulatoryEvent(
+        source_name="FDA Advisory Committee Calendar",
+        title="April 30, 2026: Meeting of the Oncologic Drugs Advisory Committee",
+        canonical_url="https://www.fda.gov/advisory-committees/advisory-committee-calendar/april-30-2026-apex-bio",
+        starts_at=datetime.now(timezone.utc) + timedelta(days=10),
+        committee_name="Oncologic Drugs Advisory Committee",
+        summary_text="The FDA will discuss Apex Bio's oncology application.",
+        mentioned_companies=["Apex Bio"],
+        company_tag_ids=[company.id],
+        topic_tags=["regulatory", "advisory-committee"],
+        source_type="regulator",
+        event_type="fda-advisory-committee",
+        priority_reason="official FDA calendar, upcoming committee date, linked to tracked company",
+        is_official_source=True,
+        freshness_bucket="upcoming",
+        importance_score=88.0,
+        market_cap_score=100.0,
+        composite_score=92.0,
+    )
+    watchlist = Watchlist(name="Tracked names", company_ids=[company.id])
+    db_session.add_all([event, watchlist])
+    db_session.commit()
+
+    company_response = client.get(f"/api/v1/companies/{company.id}")
+    company_payload = company_response.json()
+    assert company_response.status_code == 200
+    assert any(item["item_type"] == "regulatory" for item in company_payload["catalysts"])
+    assert any(item["item_type"] == "regulatory" for item in company_payload["timeline"])
+
+    watchlist_response = client.get(f"/api/v1/watchlists/{watchlist.id}/briefing")
+    watchlist_payload = watchlist_response.json()
+    assert watchlist_response.status_code == 200
+    assert any(item["item_type"] == "regulatory" for item in watchlist_payload["timeline"])
+
+    dashboard_response = client.get("/api/v1/dashboard")
+    dashboard_payload = dashboard_response.json()
+    assert dashboard_response.status_code == 200
+    assert dashboard_payload["upcoming_regulatory_events"]
+    assert dashboard_payload["upcoming_regulatory_events"][0]["item_type"] == "regulatory"

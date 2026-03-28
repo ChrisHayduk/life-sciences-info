@@ -6,6 +6,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { EmptyPanel, NewsCard, ScorePill } from "@/components/cards";
 import { Markdown } from "@/components/markdown";
 import { CollapsibleSection } from "@/components/collapsible-section";
+import { AddToWatchlistButton } from "@/components/watchlist-actions";
+import { SummarizeButton } from "@/components/summary-actions";
 import { api, formatDate } from "@/lib/api";
 
 export default async function FilingDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -32,7 +34,21 @@ export default async function FilingDetailPage({ params }: { params: Promise<{ i
           <ScorePill label="Impact" value={filing.impact_score} />
           <ScorePill label="Importance" value={filing.importance_score} />
           <ScorePill label="Mkt Cap" value={filing.market_cap_score} />
+          <Badge variant="outline" className="text-xs font-normal">
+            {filing.source_type.replaceAll("_", " ")}
+          </Badge>
+          <Badge variant="outline" className="text-xs font-normal">
+            {filing.freshness_bucket.replaceAll("_", " ")}
+          </Badge>
+          <Badge variant="outline" className="text-xs font-normal">
+            {filing.summary_tier.replaceAll("_", " ")}
+          </Badge>
         </div>
+        {filing.priority_reason ? (
+          <p className="text-sm text-muted-foreground mt-3">
+            Why it matters: {filing.priority_reason}.
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-4 mt-4">
           {filing.pdf_download_url && (
             <a href={filing.pdf_download_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 text-sm font-semibold text-primary hover:text-primary/80">
@@ -47,6 +63,7 @@ export default async function FilingDetailPage({ params }: { params: Promise<{ i
               <FileText className="size-3.5" /> Prior comparable filing
             </Link>
           )}
+          <AddToWatchlistButton companyIds={[filing.company_id]} label="Track company" />
         </div>
       </section>
 
@@ -68,10 +85,15 @@ export default async function FilingDetailPage({ params }: { params: Promise<{ i
                 </ul>
               </>
             ) : (
-              <EmptyPanel
-                title="Summary queued"
-                body="This filing is stored and ranked already. AI summary generation is budget-limited and will run automatically for higher-priority new items."
-              />
+              <div className="space-y-3">
+                <p className="text-sm leading-relaxed">
+                  {filing.summary || "This filing is stored and ranked already. AI summary generation is budget-limited and will run automatically for higher-priority new items."}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  This is the rule-based fallback view. You can spend one manual override slot to summarize this filing now.
+                </p>
+                <SummarizeButton kind="filing" itemId={filing.id} summaryStatus={filing.summary_status} />
+              </div>
             )}
           </CardContent>
         </Card>

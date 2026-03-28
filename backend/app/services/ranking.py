@@ -23,6 +23,19 @@ MATERIAL_EVENT_KEYWORDS = {
     "commercial launch": 0.8,
 }
 
+HIGH_SIGNAL_EVENT_TYPES = {
+    "results-of-operations",
+    "earnings",
+    "approval",
+    "regulatory",
+    "acquisition-disposition",
+    "acquisition",
+    "leadership-change",
+    "material-agreement",
+    "financing",
+    "clinical-data",
+}
+
 FILING_FORM_BASE_SCORES = {
     "10-K": 95.0,
     "20-F": 95.0,
@@ -144,6 +157,88 @@ def recency_score(published_at: datetime, now: datetime | None = None) -> float:
     if age_hours <= 168:
         return 60.0
     return max(10.0, 60.0 - math.log(age_hours, 2) * 5.0)
+
+
+def freshness_bucket(published_at: datetime, now: datetime | None = None) -> str:
+    now = now or datetime.now(timezone.utc)
+    if published_at.tzinfo is None:
+        published_at = published_at.replace(tzinfo=timezone.utc)
+    age_hours = max((now - published_at).total_seconds() / 3600.0, 0.0)
+    if age_hours <= 24:
+        return "last_24h"
+    if age_hours <= 24 * 7:
+        return "last_7d"
+    if age_hours <= 24 * 30:
+        return "last_30d"
+    if age_hours <= 24 * 90:
+        return "last_90d"
+    return "stale"
+
+
+def personal_relevance_score(
+    *,
+    composite_score: float,
+    published_at: datetime,
+    is_official_source: bool,
+    watchlist_match: bool = False,
+    event_type: str | None = None,
+    now: datetime | None = None,
+) -> float:
+    recency = recency_score(published_at, now=now)
+    official_bonus = 10.0 if is_official_source else 0.0
+    watchlist_bonus = 15.0 if watchlist_match else 0.0
+    event_bonus = 8.0 if event_type in HIGH_SIGNAL_EVENT_TYPES else 0.0
+    return round((0.45 * composite_score) + (0.35 * recency) + official_bonus + watchlist_bonus + event_bonus, 2)
+
+
+def filing_priority_reason(
+    filing: Filing,
+    *,
+    company_market_cap_score: float,
+    impact_score: float,
+    recency: float,
+) -> str:
+    reasons: list[str] = []
+    if filing.event_type in HIGH_SIGNAL_EVENT_TYPES:
+        reasons.append(f"{filing.event_type.replace('-', ' ')} event")
+    elif filing.normalized_form_type in {"10-K", "20-F", "40-F"}:
+        reasons.append("annual disclosure")
+    elif filing.normalized_form_type == "10-Q":
+        reasons.append("quarterly disclosure")
+    elif filing.normalized_form_type == "8-K":
+        reasons.append("current event filing")
+    if recency >= 80:
+        reasons.append("very recent")
+    if impact_score >= 75:
+        reasons.append("high change signal")
+    elif impact_score >= 55:
+        reasons.append("meaningful update")
+    if company_market_cap_score >= 75:
+        reasons.append("large-cap issuer")
+    return ", ".join(reasons[:3]) or "ranked on recency, form type, and company relevance"
+
+
+def news_priority_reason(
+    news_item: NewsItem,
+    *,
+    company_market_cap_score: float,
+    importance: float,
+    recency: float,
+) -> str:
+    reasons: list[str] = []
+    if news_item.event_type in HIGH_SIGNAL_EVENT_TYPES:
+        reasons.append(f"{news_item.event_type.replace('-', ' ')} coverage")
+    if news_item.is_official_source:
+        reasons.append("official source")
+    elif (news_item.source_weight or 0.0) >= 0.9:
+        reasons.append("high-trust trade press")
+    if recency >= 80:
+        reasons.append("very recent")
+    if importance >= 75:
+        reasons.append("high importance")
+    if company_market_cap_score >= 75 and news_item.company_tag_ids:
+        reasons.append("relevant to large-cap company")
+    return ", ".join(reasons[:3]) or "ranked on recency, source quality, and company relevance"
 
 
 def compute_filing_scores(

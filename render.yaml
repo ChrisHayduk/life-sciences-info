@@ -26,13 +26,21 @@ services:
       - key: ENABLE_BROWSER_PDF_RENDERING
         value: "true"
       - key: MAX_FILING_SUMMARIES_PER_DAY
-        value: "12"
-      - key: MAX_NEWS_SUMMARIES_PER_DAY
-        value: "24"
-      - key: MAX_FILING_SUMMARIES_PER_RUN
         value: "3"
+      - key: MAX_NEWS_SUMMARIES_PER_DAY
+        value: "7"
+      - key: MAX_OVERRIDE_SUMMARIES_PER_DAY
+        value: "2"
+      - key: MAX_FILING_SUMMARIES_PER_RUN
+        value: "2"
       - key: MAX_NEWS_SUMMARIES_PER_RUN
-        value: "8"
+        value: "4"
+      - key: COMPANY_IR_TOP_COMPANY_LIMIT
+        value: "25"
+      - key: CATALYST_LOOKAHEAD_DAYS
+        value: "180"
+      - key: RECENT_CATALYST_DAYS
+        value: "90"
       - key: FILING_SUMMARY_BACKLOG_DAYS
         value: "14"
       - key: NEWS_SUMMARY_BACKLOG_DAYS

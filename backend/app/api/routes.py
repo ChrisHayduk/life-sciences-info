@@ -12,22 +12,35 @@ from app.config import get_settings
 from app.db import get_session
 from app.jobs import (
     run_ingest_news,
+    run_poll_regulatory_events,
     run_poll_sec_filings,
     run_refresh_market_caps,
     run_resummarize_item,
     run_retag_news_companies,
     run_summarize_pending,
 )
-from app.models import ClinicalTrial, Company, Digest, Filing, NewsItem, SummaryUsage
-from app.schemas import AdminActionResponse, CompanyDetailResponse, CompanyResponse, DashboardResponse
+from app.models import ClinicalTrial, Company, Digest, Filing, NewsItem, RegulatoryEvent, SummaryUsage, Watchlist
+from app.schemas import (
+    AdminActionResponse,
+    CompanyDetailResponse,
+    CompanyResponse,
+    DashboardResponse,
+    SummaryBudgetOverview,
+    SummaryBudgetSnapshot,
+    WatchlistBriefingResponse,
+)
 from app.services.clinical_trials import ClinicalTrialsService
+from app.services.catalysts import CatalystService
 from app.services.events import event_stream
 from app.services.digests import DigestService
 from app.services.filings import FilingService
 from app.services.news import NewsService
+from app.services.regulatory_events import RegulatoryEventService
 from app.services.ranking import compute_company_trend
 from app.services.storage import ObjectStore
+from app.services.summary_budget import SummaryBudgetService
 from app.services.universe import UniverseService, describe_universe_reason
+from app.services.watchlists import WatchlistService
 
 router = APIRouter()
 
@@ -65,25 +78,72 @@ def require_admin_token(
         raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
+def _summary_budget_overview(session: Session) -> SummaryBudgetOverview:
+    budget = SummaryBudgetService(session)
+    return SummaryBudgetOverview(
+        filing=SummaryBudgetSnapshot(
+            used=budget.used_today("filing"),
+            limit=budget.settings.max_filing_summaries_per_day,
+            remaining=budget.remaining("filing"),
+        ),
+        news=SummaryBudgetSnapshot(
+            used=budget.used_today("news"),
+            limit=budget.settings.max_news_summaries_per_day,
+            remaining=budget.remaining("news"),
+        ),
+        override=SummaryBudgetSnapshot(
+            used=budget.used_today("override"),
+            limit=budget.settings.max_override_summaries_per_day,
+            remaining=budget.remaining("override"),
+        ),
+    )
+
+
 @router.get("/dashboard", response_model=DashboardResponse)
 def get_dashboard(session: Session = Depends(get_session)) -> DashboardResponse:
     filing_service = FilingService(session)
     news_service = NewsService(session)
     digest_service = DigestService(session)
     trials_service = ClinicalTrialsService(session)
+    regulatory_service = RegulatoryEventService(session)
+    watchlist_service = WatchlistService(session)
     digests = digest_service.list_digests(limit=1)
     recent_trials = trials_service.list_trials(limit=5)
+    latest_filings = filing_service.list_filings(limit=5, recent_days=1, sort_mode="freshness")
+    latest_news = news_service.list_news(limit=5, recent_days=1, sort_mode="freshness")
+    important_filings = filing_service.list_filings(limit=5, recent_days=90, sort_mode="importance")
+    important_news = news_service.list_news(limit=5, recent_days=14, sort_mode="importance")
     return DashboardResponse(
-        top_filings=filing_service.list_filings(limit=5, recent_days=365),
-        top_news=news_service.list_news(limit=5, recent_days=30),
+        latest_filings=latest_filings,
+        latest_news=latest_news,
+        important_filings=important_filings,
+        important_news=important_news,
+        top_filings=important_filings,
+        top_news=important_news,
+        watchlist_highlights=watchlist_service.build_dashboard_highlights(limit_watchlists=3, limit_items=3),
+        upcoming_regulatory_events=regulatory_service.list_timeline_events(
+            limit=6,
+            include_past_days=14,
+            upcoming_days=180,
+        ),
         recent_trials=recent_trials,
         latest_digest=digests[0] if digests else None,
         counts={
             "companies": session.scalar(select(func.count()).select_from(Company)) or 0,
             "filings": session.scalar(select(func.count()).select_from(Filing)) or 0,
             "news_items": session.scalar(select(func.count()).select_from(NewsItem)) or 0,
+            "regulatory_events": session.scalar(select(func.count()).select_from(RegulatoryEvent)) or 0,
             "clinical_trials": session.scalar(select(func.count()).select_from(ClinicalTrial)) or 0,
             "digests": session.scalar(select(func.count()).select_from(Digest)) or 0,
+        },
+        ai_budget=_summary_budget_overview(session),
+        queue_counts={
+            "filings_pending": session.scalar(
+                select(func.count()).select_from(Filing).where(Filing.summary_status.in_(["pending", "failed", "stale"]))
+            ) or 0,
+            "news_pending": session.scalar(
+                select(func.count()).select_from(NewsItem).where(NewsItem.summary_status.in_(["pending", "failed", "stale"]))
+            ) or 0,
         },
     )
 
@@ -112,6 +172,8 @@ def company_detail(company_id: int, session: Session = Depends(get_session)) -> 
 
     filing_service = FilingService(session)
     news_service = NewsService(session)
+    watchlist_service = WatchlistService(session)
+    catalyst_service = CatalystService(session)
     recent_filings = filing_service.list_filings(limit=20, company_id=company.id)
     recent_news = news_service.list_news_for_company(company, limit=20)
     base = build_company_response(company)
@@ -122,6 +184,26 @@ def company_detail(company_id: int, session: Session = Depends(get_session)) -> 
     trend = compute_company_trend(session, company.id)
     trials_service = ClinicalTrialsService(session)
     pipeline = trials_service.list_trials_for_company_grouped(company.id)
+    timeline = watchlist_service.build_company_timeline(company.id, limit=25)
+    latest_filing = max(recent_filings, key=lambda item: (item.filed_at, item.composite_score), default=None)
+    latest_news = max(recent_news, key=lambda item: (item.published_at, item.composite_score), default=None)
+    latest_trial_items = trials_service.list_trials(company_id=company.id, limit=1)
+    latest_trial = latest_trial_items[0] if latest_trial_items else None
+    catalysts = catalyst_service.build_company_catalysts(company.id, limit=6)
+    business_summary = ""
+    change_summary: list[str] = []
+    catalyst_summary = catalyst_service.summarize_catalysts(catalysts, limit=4)
+    if latest_filing:
+        filing_row = session.get(Filing, latest_filing.id)
+        business_summary = (
+            ((filing_row.parsed_sections or {}).get("business") or "")[:420].strip()
+            if filing_row
+            else ""
+        )
+        summary_json = (filing_row.summary_json or {}) if filing_row else {}
+        change_summary = (summary_json.get("material_changes") or summary_json.get("key_takeaways") or [])[:4]
+    if not business_summary:
+        business_summary = company.sic_description or "Covered public life sciences issuer."
 
     return CompanyDetailResponse(
         **base.model_dump(),
@@ -130,24 +212,44 @@ def company_detail(company_id: int, session: Session = Depends(get_session)) -> 
         news_count=news_count,
         recent_filings=recent_filings,
         recent_news=recent_news,
+        timeline=timeline,
+        latest_filing=latest_filing,
+        latest_news=latest_news,
+        latest_trial=latest_trial,
+        business_summary=business_summary,
+        change_summary=change_summary,
+        catalyst_summary=catalyst_summary[:4],
+        catalysts=catalysts,
         trend=trend,
         pipeline=pipeline,
     )
 
 
+@router.get("/companies/{company_id}/timeline")
+def company_timeline(company_id: int, limit: int = 30, session: Session = Depends(get_session)):
+    company = session.get(Company, company_id)
+    if not company or not company.is_active:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return WatchlistService(session).build_company_timeline(company_id, limit=limit)
+
+
 @router.get("/filings")
 def list_filings(
     company_id: int | None = None,
+    watchlist_id: int | None = None,
     limit: int = 50,
     offset: int = 0,
     form_type: str | None = None,
     search: str | None = None,
     sort_by: str = "composite_score",
+    recent_days: int | None = None,
+    sort_mode: str | None = None,
     session: Session = Depends(get_session),
 ):
     result = FilingService(session).list_filings_paginated(
         limit=limit, offset=offset, company_id=company_id,
         form_type=form_type, search=search, sort_by=sort_by,
+        recent_days=recent_days, watchlist_id=watchlist_id, sort_mode=sort_mode,
     )
     return result
 
@@ -160,6 +262,30 @@ def filing_detail(filing_id: int, session: Session = Depends(get_session)):
     return filing
 
 
+@router.post("/filings/{filing_id}/summarize", response_model=AdminActionResponse)
+def summarize_filing_on_demand(filing_id: int, session: Session = Depends(get_session)) -> AdminActionResponse:
+    try:
+        result = FilingService(session).summarize_item(
+            filing_id,
+            consume_override_budget=True,
+            force=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == "override_budget_exhausted":
+            raise HTTPException(status_code=429, detail="Daily manual summary budget exhausted") from exc
+        raise
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            "Filing summary refreshed."
+            if result["status"] == "summarized"
+            else "Filing already has a current summary."
+        ),
+    )
+
+
 @router.get("/news")
 def list_news(
     limit: int = 50,
@@ -167,13 +293,58 @@ def list_news(
     source_name: str | None = None,
     search: str | None = None,
     sort_by: str = "composite_score",
+    recent_days: int | None = None,
+    watchlist_id: int | None = None,
+    sort_mode: str | None = None,
     session: Session = Depends(get_session),
 ):
     result = NewsService(session).list_news_paginated(
         limit=limit, offset=offset, source_name=source_name,
         search=search, sort_by=sort_by,
+        recent_days=recent_days, watchlist_id=watchlist_id, sort_mode=sort_mode,
     )
     return result
+
+
+@router.get("/regulatory-events")
+def list_regulatory_events(
+    company_id: int | None = None,
+    limit: int = 20,
+    include_past_days: int = 14,
+    upcoming_days: int = 180,
+    session: Session = Depends(get_session),
+):
+    company_ids = [company_id] if company_id is not None else None
+    return RegulatoryEventService(session).list_timeline_events(
+        company_ids=company_ids,
+        limit=limit,
+        include_past_days=include_past_days,
+        upcoming_days=upcoming_days,
+    )
+
+
+@router.post("/news/{news_id}/summarize", response_model=AdminActionResponse)
+def summarize_news_on_demand(news_id: int, session: Session = Depends(get_session)) -> AdminActionResponse:
+    try:
+        result = NewsService(session).summarize_item(
+            news_id,
+            consume_override_budget=True,
+            force=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if str(exc) == "override_budget_exhausted":
+            raise HTTPException(status_code=429, detail="Daily manual summary budget exhausted") from exc
+        raise
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            "News summary refreshed."
+            if result["status"] == "summarized"
+            else "News item already has a current summary."
+        ),
+    )
 
 
 @router.get("/digests")
@@ -278,6 +449,18 @@ def admin_ingest_news(session: Session = Depends(get_session)) -> AdminActionRes
     )
 
 
+@router.post("/admin/poll-regulatory-events", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_poll_regulatory_events(limit: int | None = None) -> AdminActionResponse:
+    result = run_poll_regulatory_events(limit=limit)
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Synced {result['inserted']} new and {result['updated']} updated FDA events; "
+            f"{result['tagged']} tagged to covered companies."
+        ),
+    )
+
+
 @router.post("/admin/retag-news-companies", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
 def admin_retag_news_companies(
     limit: int | None = None,
@@ -335,19 +518,15 @@ def admin_poll_trials(limit: int | None = None, session: Session = Depends(get_s
     )
 
 
-# ── Watchlist endpoints ──
-
-from app.models import Watchlist
-
-
 @router.get("/watchlists")
 def list_watchlists(session: Session = Depends(get_session)):
-    return session.scalars(select(Watchlist).order_by(Watchlist.created_at.desc())).all()
+    return WatchlistService(session).list_watchlists()
 
 
 @router.post("/watchlists")
 def create_watchlist(
     name: str,
+    description: str = "",
     company_ids: str = "",
     form_types: str = "",
     topic_tags: str = "",
@@ -355,6 +534,7 @@ def create_watchlist(
 ):
     watchlist = Watchlist(
         name=name,
+        description=description or None,
         company_ids=[int(x) for x in company_ids.split(",") if x.strip()],
         form_types=[x.strip() for x in form_types.split(",") if x.strip()],
         topic_tags=[x.strip() for x in topic_tags.split(",") if x.strip()],
@@ -365,6 +545,11 @@ def create_watchlist(
     return watchlist
 
 
+@router.post("/watchlists/starter")
+def create_starter_watchlists(session: Session = Depends(get_session)):
+    return WatchlistService(session).ensure_starter_watchlists()
+
+
 @router.get("/watchlists/{watchlist_id}")
 def get_watchlist(watchlist_id: int, session: Session = Depends(get_session)):
     watchlist = session.get(Watchlist, watchlist_id)
@@ -373,42 +558,28 @@ def get_watchlist(watchlist_id: int, session: Session = Depends(get_session)):
     return watchlist
 
 
-@router.get("/watchlists/{watchlist_id}/feed")
+@router.post("/watchlists/{watchlist_id}/companies")
+def add_companies_to_watchlist(watchlist_id: int, company_ids: str, session: Session = Depends(get_session)):
+    ids = [int(value) for value in company_ids.split(",") if value.strip()]
+    if not ids:
+        raise HTTPException(status_code=400, detail="company_ids is required")
+    try:
+        return WatchlistService(session).add_companies(watchlist_id, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/watchlists/{watchlist_id}/briefing", response_model=WatchlistBriefingResponse)
+def watchlist_briefing(watchlist_id: int, limit: int = 30, session: Session = Depends(get_session)):
+    try:
+        return WatchlistService(session).build_watchlist_briefing(watchlist_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/watchlists/{watchlist_id}/feed", response_model=WatchlistBriefingResponse)
 def watchlist_feed(watchlist_id: int, limit: int = 30, session: Session = Depends(get_session)):
-    """Return filings and news matching a watchlist's criteria."""
-    watchlist = session.get(Watchlist, watchlist_id)
-    if not watchlist:
-        raise HTTPException(status_code=404, detail="Watchlist not found")
-
-    filing_service = FilingService(session)
-    news_service = NewsService(session)
-
-    filings = []
-    news = []
-    for cid in (watchlist.company_ids or []):
-        filings.extend(filing_service.list_filings(limit=10, company_id=cid))
-        news.extend(news_service.list_news_for_company_by_id(cid, limit=10))
-
-    # Deduplicate and sort by composite score
-    seen_filing_ids: set[int] = set()
-    unique_filings = []
-    for f in sorted(filings, key=lambda x: x.composite_score, reverse=True):
-        if f.id not in seen_filing_ids:
-            seen_filing_ids.add(f.id)
-            unique_filings.append(f)
-
-    seen_news_ids: set[int] = set()
-    unique_news = []
-    for n in sorted(news, key=lambda x: x.composite_score, reverse=True):
-        if n.id not in seen_news_ids:
-            seen_news_ids.add(n.id)
-            unique_news.append(n)
-
-    return {
-        "watchlist": watchlist,
-        "filings": unique_filings[:limit],
-        "news": unique_news[:limit],
-    }
+    return watchlist_briefing(watchlist_id, limit=limit, session=session)
 
 
 @router.delete("/watchlists/{watchlist_id}")

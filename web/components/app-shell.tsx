@@ -14,7 +14,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </span>
           <h1 className="text-2xl font-bold mt-1">Intel Grid</h1>
           <p className="text-sm text-[var(--color-sidebar-muted)] mt-2 leading-relaxed">
-            Filings, market context, and news ranked by what matters now.
+            Briefing dashboard, watchlists, and company pages for staying current without paying terminal-level costs.
           </p>
         </div>
         <SidebarNav />

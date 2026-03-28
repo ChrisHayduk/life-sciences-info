@@ -235,9 +235,9 @@ def test_backfill_loads_target_forms_and_dedupes_on_rerun(db_session, company, t
     created_second = service.backfill_company(company.id)
 
     filings = db_session.query(Filing).order_by(Filing.filed_at).all()
-    assert created_first == 3
+    assert created_first == 4
     assert created_second == 0
-    assert [filing.normalized_form_type for filing in filings] == ["10-K", "20-F", "6-K"]
+    assert [filing.normalized_form_type for filing in filings] == ["10-K", "20-F", "6-K", "8-K"]
     assert all(filing.original_document_url for filing in filings)
     assert all(filing.pdf_artifact_key for filing in filings)
     pdf_bytes = ObjectStore().get_bytes(filings[0].pdf_artifact_key)
@@ -269,7 +269,7 @@ def test_backfill_prefers_browser_rendered_html_pdf_when_available(db_session, c
     filing = db_session.query(Filing).filter(Filing.normalized_form_type == "10-K").one()
     pdf_bytes = ObjectStore().get_bytes(filing.pdf_artifact_key)
 
-    assert created == 3
+    assert created == 4
     assert pdf_bytes == b"%PDF-browser-rendered"
     assert filing.extra_metadata["pdf_source"] == "rendered-html"
 
@@ -290,7 +290,7 @@ def test_backfill_company_can_limit_by_years_back(db_session, company, tmp_path,
     created = service.backfill_company(company.id, years_back=3)
     filings = db_session.query(Filing).all()
 
-    assert created == 3
+    assert created == 4
     assert all(filing.filed_at.year >= 2023 for filing in filings)
 
 
@@ -333,6 +333,27 @@ def test_automated_filing_summarization_processes_polled_items_with_limit(db_ses
     result = service.summarize_pending(limit=1, automated=True)
 
     complete_count = db_session.query(Filing).filter(Filing.summary_status == "complete").count()
-    assert created == 3
+    assert created == 4
     assert result["summarized"] == 1
     assert complete_count == 1
+
+
+def test_filing_list_item_uses_rule_based_fallback_summary_when_ai_summary_is_missing(db_session, company, tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_ARTIFACT_DIR", str(tmp_path / "artifacts"))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    service = FilingService(
+        db_session,
+        sec_client=FakeSECClient(),
+        summarizer=StubSummarizer(),
+        market_data_client=StubMarketData(),
+        object_store=ObjectStore(),
+    )
+
+    service.backfill_company(company.id)
+    filing = db_session.query(Filing).filter(Filing.normalized_form_type == "10-K").one()
+    item = service._to_list_item(filing, company)
+
+    assert item.summary
+    assert "Guidance increased after strong quarterly results." in item.summary

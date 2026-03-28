@@ -146,12 +146,17 @@ def test_run_refresh_all_data_refreshes_market_caps_before_selecting_companies(m
         lambda **kwargs: events.append("refresh_caps")
         or {"companies": 1, "refreshed": 1, "failed": 0, "last_error": None, "reranked_filings": 2, "reranked_news": 1},
     )
+    monkeypatch.setattr(
+        jobs,
+        "run_poll_regulatory_events",
+        lambda **kwargs: events.append("refresh_regulatory") or {"scanned": 1, "inserted": 1, "updated": 0, "tagged": 1},
+    )
     monkeypatch.setattr(jobs, "_load_active_companies", lambda session, focus_tickers=None: [company])
     monkeypatch.setattr(jobs, "_with_session", lambda callback: callback(object()))
 
     result = jobs.run_refresh_all_data(include_news=False, build_digest=False, company_count=1)
 
-    assert events[:4] == ["sync", "refresh_caps", "reprocess:1", "backfill:1"]
+    assert events[:5] == ["sync", "refresh_caps", "refresh_regulatory", "reprocess:1", "backfill:1"]
     assert result["refreshed_market_caps"] == 1
     assert result["failed_market_caps"] == 0
     assert result["reranked_filings"] == 2
@@ -176,3 +181,24 @@ def test_run_retag_news_companies_returns_scan_update_counts(db_session, monkeyp
     result = jobs.run_retag_news_companies(limit=25, recent_days=7, focus_tickers=["ABIO"])
 
     assert result == {"scanned": 12, "updated": 5, "reranked": 12}
+
+
+def test_run_resummarize_item_uses_service_level_manual_summary(db_session, monkeypatch):
+    class FakeFilingService:
+        called = None
+
+        def __init__(self, session):
+            self.session = session
+
+        def summarize_item(self, item_id, *, consume_override_budget=False, force=False):
+            FakeFilingService.called = (item_id, consume_override_budget, force)
+            return {"status": "summarized", "remaining_override_budget": 2}
+
+    monkeypatch.setattr("app.jobs.init_db", lambda: None)
+    monkeypatch.setattr("app.jobs.SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.jobs.FilingService", FakeFilingService)
+
+    result = jobs.run_resummarize_item("filing", 55)
+
+    assert result == 55
+    assert FakeFilingService.called == (55, False, True)

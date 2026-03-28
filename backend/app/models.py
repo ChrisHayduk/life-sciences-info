@@ -64,7 +64,14 @@ class Filing(Base, TimestampMixin):
     summary_model: Mapped[str | None] = mapped_column(String(64))
     summary_prompt_version: Mapped[str | None] = mapped_column(String(64))
     summary_status: Mapped[str] = mapped_column(String(32), default="pending")
+    summary_tier: Mapped[str] = mapped_column(String(32), default="no_ai")
     summary_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    source_type: Mapped[str] = mapped_column(String(32), default="official_filing")
+    event_type: Mapped[str | None] = mapped_column(String(64))
+    priority_reason: Mapped[str | None] = mapped_column(String(255))
+    is_official_source: Mapped[bool] = mapped_column(Boolean, default=True)
+    dedupe_group_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    freshness_bucket: Mapped[str] = mapped_column(String(32), default="stale")
     importance_score: Mapped[float] = mapped_column(Float, default=0.0)
     market_cap_score: Mapped[float] = mapped_column(Float, default=0.0)
     impact_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -106,7 +113,14 @@ class NewsItem(Base, TimestampMixin):
     summary_model: Mapped[str | None] = mapped_column(String(64))
     summary_prompt_version: Mapped[str | None] = mapped_column(String(64))
     summary_status: Mapped[str] = mapped_column(String(32), default="pending")
+    summary_tier: Mapped[str] = mapped_column(String(32), default="no_ai")
     summary_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    source_type: Mapped[str] = mapped_column(String(32), default="trade_press")
+    event_type: Mapped[str | None] = mapped_column(String(64))
+    priority_reason: Mapped[str | None] = mapped_column(String(255))
+    is_official_source: Mapped[bool] = mapped_column(Boolean, default=False)
+    dedupe_group_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    freshness_bucket: Mapped[str] = mapped_column(String(32), default="stale")
     importance_score: Mapped[float] = mapped_column(Float, default=0.0)
     market_cap_score: Mapped[float] = mapped_column(Float, default=0.0)
     composite_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -170,12 +184,44 @@ class ClinicalTrial(Base, TimestampMixin):
     company: Mapped[Company | None] = relationship(foreign_keys=[company_id])
 
 
+class RegulatoryEvent(Base, TimestampMixin):
+    """Official regulatory or advisory-calendar event."""
+
+    __tablename__ = "regulatory_events"
+    __table_args__ = (
+        UniqueConstraint("canonical_url", name="uq_regulatory_events_canonical_url"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_name: Mapped[str] = mapped_column(String(128), index=True)
+    title: Mapped[str] = mapped_column(String(512), index=True)
+    canonical_url: Mapped[str] = mapped_column(Text)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    committee_name: Mapped[str | None] = mapped_column(String(255), index=True)
+    summary_text: Mapped[str | None] = mapped_column(Text)
+    mentioned_companies: Mapped[list[str]] = mapped_column(JSON, default=list)
+    company_tag_ids: Mapped[list[int]] = mapped_column(JSON, default=list)
+    topic_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_type: Mapped[str] = mapped_column(String(32), default="regulator")
+    event_type: Mapped[str] = mapped_column(String(64), default="fda-advisory-committee")
+    priority_reason: Mapped[str | None] = mapped_column(String(255))
+    is_official_source: Mapped[bool] = mapped_column(Boolean, default=True)
+    freshness_bucket: Mapped[str] = mapped_column(String(32), default="upcoming")
+    importance_score: Mapped[float] = mapped_column(Float, default=0.0)
+    market_cap_score: Mapped[float] = mapped_column(Float, default=0.0)
+    composite_score: Mapped[float] = mapped_column(Float, default=0.0)
+    extra_metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 class Watchlist(Base, TimestampMixin):
     """User-defined watchlist for tracking specific companies and topics."""
     __tablename__ = "watchlists"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(String(255))
+    preset_key: Mapped[str | None] = mapped_column(String(64), index=True)
     company_ids: Mapped[list] = mapped_column(JSON, default=list)
     form_types: Mapped[list] = mapped_column(JSON, default=list)
     topic_tags: Mapped[list] = mapped_column(JSON, default=list)

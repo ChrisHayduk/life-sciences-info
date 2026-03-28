@@ -106,23 +106,33 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1
 CORS_ORIGINS=http://localhost:3000
 ADMIN_API_TOKEN=
 MARKET_DATA_PROVIDER=none
-MAX_FILING_SUMMARIES_PER_DAY=12
-MAX_NEWS_SUMMARIES_PER_DAY=24
-MAX_FILING_SUMMARIES_PER_RUN=3
-MAX_NEWS_SUMMARIES_PER_RUN=8
+MAX_FILING_SUMMARIES_PER_DAY=3
+MAX_NEWS_SUMMARIES_PER_DAY=7
+MAX_OVERRIDE_SUMMARIES_PER_DAY=2
+MAX_FILING_SUMMARIES_PER_RUN=2
+MAX_NEWS_SUMMARIES_PER_RUN=4
+COMPANY_IR_TOP_COMPANY_LIMIT=25
+CATALYST_LOOKAHEAD_DAYS=180
+RECENT_CATALYST_DAYS=90
 ```
 
 ## Notes
 
 - `6-K` items are admitted only when heuristics indicate a periodic-results equivalent.
+- Material `8-K` items are now ingested for results, financings, leadership changes, strategic transactions, and other high-signal event categories.
 - If OpenAI credentials are missing, the app falls back to deterministic local summaries for development and tests.
 - `MARKET_DATA_PROVIDER=fmp` is the recommended production default. `alpha_vantage` and `none` remain available for migration or low-cost fallback modes.
 - `FMP_API_KEY` powers the batched market-cap refresh flow. `ALPHA_VANTAGE_API_KEY` is optional and only used if `MARKET_DATA_PROVIDER=alpha_vantage`.
-- Historical backfills now queue summaries instead of immediately calling OpenAI. Automated summarization is budget-limited and prioritizes recent pending items.
+- Historical backfills now queue summaries instead of immediately calling OpenAI. Automated summarization is budget-limited, watchlist-aware, and uses a small daily override pool for especially important items.
 - `python -m app.jobs summarize-pending filing --limit 5 --include-historical` is the manual escape hatch when you want to spend budget on backlog items.
+- Official company press release feeds are supported through a mix of starter built-in mappings and company overrides. Per-company overrides can use `Company.extra_metadata["ir_feed_url"]`, `["ir_news_page_url"]`, or a richer `["ir_sources"]` list when a company exposes an HTML investor-news page instead of RSS.
+- The platform now tracks FDA advisory-calendar events as a dedicated official catalyst source, stores them separately from news, and surfaces them in dashboard, company, and watchlist timelines.
+- Company pages and watchlist briefings now include structured catalyst cards built from official news, FDA calendar events, material event filings, and upcoming or recently updated ClinicalTrials.gov milestones.
+- Private single-user deployments can request one-off summaries directly from filing and news views; those on-demand summaries consume the small override budget instead of opening the full backlog.
 - Use `OBJECT_STORE_*` env vars for any S3-compatible provider. Legacy `S3_*` names are still accepted for backward compatibility.
 - If object storage settings are absent, artifact storage falls back to the local filesystem.
 - `OBJECT_STORE_REGION=auto` is the right default for Cloudflare R2.
 - `CORS_ORIGINS` accepts a comma-separated list for split frontend/API deployments.
 - `ADMIN_API_TOKEN` protects the `/admin/*` routes when set.
 - `ENABLE_BROWSER_PDF_RENDERING=true` lets the backend use Playwright + Chromium to render SEC HTML filings directly to PDF. If browser rendering is unavailable, the app falls back to the internal text-based PDF generator.
+- The UI now centers on three surfaces: a dashboard briefing, watchlist briefings, and company pages with merged filings/news/trials timelines.

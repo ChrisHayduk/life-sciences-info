@@ -14,13 +14,28 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import Company, Filing, FilingNewsLink, NewsItem
+from app.models import Company, Filing, FilingNewsLink, NewsItem, Watchlist
 from app.schemas import FilingDetail, FilingListItem
-from app.services.constants import ANNUAL_FORMS, FILING_SECTION_PATTERNS, INTERIM_FORMS, TARGET_FORMS
+from app.services.constants import (
+    ANNUAL_FORMS,
+    EIGHT_K_ITEM_TOPICS,
+    FILING_SECTION_PATTERNS,
+    INTERIM_FORMS,
+    MATERIAL_EIGHT_K_ITEMS,
+    TARGET_FORMS,
+)
 from app.services.html_pdf import render_html_to_pdf
 from app.services.market_data import MarketDataClient
 from app.services.pdf import build_pdf_from_text
-from app.services.ranking import company_market_cap_percentiles, compute_filing_scores, compute_pending_filing_scores, summary_priority_score
+from app.services.ranking import (
+    company_market_cap_percentiles,
+    compute_filing_scores,
+    compute_pending_filing_scores,
+    filing_priority_reason,
+    freshness_bucket,
+    personal_relevance_score,
+    summary_priority_score,
+)
 from app.services.sec import SECClient
 from app.services.storage import ObjectStore
 from app.services.summary_budget import SummaryBudgetService
@@ -64,6 +79,7 @@ NAMESPACE_TOKEN_RE = re.compile(r"^[a-z][\w.-]*:[\w.-]+$", re.IGNORECASE)
 DATE_TOKEN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 CIK_TOKEN_RE = re.compile(r"^\d{8,10}$")
 MULTISPACE_RE = re.compile(r"[ \t]+")
+ITEM_NUMBER_RE = re.compile(r"\b\d\.\d{2}\b")
 
 ANNUAL_SECTION_REGEXES: dict[str, tuple[re.Pattern[str], ...]] = {
     "business": (
@@ -169,8 +185,78 @@ def is_periodic_6k(title: str | None, text: str, items: str | None = None) -> bo
         "earnings release",
         "results for the quarter",
         "six months ended",
+        "guidance",
+        "approval",
+        "partnership",
+        "collaboration",
+        "leadership",
+        "financing",
     ]
     return any(keyword in lowered for keyword in keywords)
+
+
+def extract_item_numbers(value: str | None) -> list[str]:
+    return sorted(set(ITEM_NUMBER_RE.findall(value or "")))
+
+
+def is_material_8k(item_numbers: list[str], title: str | None, text: str) -> bool:
+    if any(item in MATERIAL_EIGHT_K_ITEMS for item in item_numbers):
+        return True
+    lowered = " ".join(filter(None, [title or "", text[:6000]])).lower()
+    keywords = [
+        "earnings",
+        "guidance",
+        "approval",
+        "complete response letter",
+        "partnership",
+        "collaboration",
+        "acquisition",
+        "merger",
+        "chief executive",
+        "chief financial",
+        "financing",
+        "offering",
+    ]
+    return any(keyword in lowered for keyword in keywords)
+
+
+def infer_filing_event_type(normalized_form_type: str, item_numbers: list[str], title: str | None, raw_text: str | None) -> str | None:
+    if normalized_form_type in {"10-K", "20-F", "40-F"}:
+        return "annual-report"
+    if normalized_form_type == "10-Q":
+        return "quarterly-report"
+    if normalized_form_type == "6-K":
+        lowered = " ".join(filter(None, [title or "", (raw_text or "")[:4000]])).lower()
+        if "earnings" in lowered or "results" in lowered:
+            return "earnings"
+        if "approval" in lowered or "fda" in lowered:
+            return "regulatory"
+        if "partnership" in lowered or "collaboration" in lowered:
+            return "material-agreement"
+        return "foreign-issuer-update"
+    if normalized_form_type == "8-K":
+        for item in item_numbers:
+            topic = EIGHT_K_ITEM_TOPICS.get(item)
+            if topic:
+                return topic
+        return "current-event"
+    return None
+
+
+def filing_dedupe_group_id(company_id: int, filing: Filing | None = None, *, accession_number: str | None = None, event_type: str | None = None, filed_at: datetime | None = None) -> str:
+    if accession_number:
+        return f"filing:{accession_number}"
+    date_key = (filed_at or filing.filed_at).date().isoformat() if (filed_at or (filing.filed_at if filing else None)) else "unknown"
+    accession = accession_number or (filing.accession_number if filing else "unknown")
+    return f"{company_id}:{event_type or 'filing'}:{date_key}:{accession}"
+
+
+def watchlist_company_ids(session: Session) -> set[int]:
+    watchlists = session.scalars(select(Watchlist)).all()
+    ids: set[int] = set()
+    for watchlist in watchlists:
+        ids.update(int(company_id) for company_id in (watchlist.company_ids or []))
+    return ids
 
 
 def _strip_html_noise(soup: BeautifulSoup) -> None:
@@ -500,15 +586,41 @@ class FilingService:
         filing.parsed_sections = parsed_sections
         filing.raw_artifact_key = raw_key
         filing.pdf_artifact_key = pdf_key
-        filing.extra_metadata = {**(filing.extra_metadata or {}), "pdf_source": pdf_source}
+        filing.event_type = infer_filing_event_type(
+            filing.normalized_form_type,
+            filing.item_numbers or [],
+            filing.title,
+            raw_text,
+        )
+        filing.source_type = "official_filing"
+        filing.is_official_source = True
+        filing.dedupe_group_id = filing_dedupe_group_id(
+            company.id,
+            filing,
+            event_type=filing.event_type,
+        )
+        filing.freshness_bucket = freshness_bucket(filing.filed_at)
+        previous_summary_hash = (filing.extra_metadata or {}).get("summary_source_hash")
+        summary_source_hash = hashlib.sha256(self._summary_source_text(filing).encode("utf-8")).hexdigest()
+        filing.extra_metadata = {
+            **(filing.extra_metadata or {}),
+            "pdf_source": pdf_source,
+            "summary_source_hash": summary_source_hash,
+        }
 
         prior = self._prior_comparable_filing(company.id, filing)
         filing.prior_comparable_filing_id = prior.id if prior else None
         if resummarize:
-            self._apply_summary(filing, company, prior_filing=prior, trigger="manual")
+            self._apply_summary(filing, company, prior_filing=prior, trigger="manual", summary_tier="full_ai")
         else:
             if not filing.summary_json:
                 filing.summary_status = "pending"
+                filing.summary_tier = "no_ai"
+            elif (
+                filing.summary_prompt_version != self.settings.summary_prompt_version
+                or previous_summary_hash != summary_source_hash
+            ):
+                filing.summary_status = "stale"
             self._apply_scores(filing, company, prior_filing=prior)
 
         if commit:
@@ -530,11 +642,18 @@ class FilingService:
         primary_document = filing_row.get("primaryDocument")
         filing_doc = self.sec_client.download_primary_document(company.cik, accession_number, primary_document)
         raw_text = html_to_text(filing_doc.content, filing_doc.content_type)
+        item_numbers = extract_item_numbers(filing_row.get("items"))
 
         if normalized_form_type == "6-K" and not is_periodic_6k(
             filing_row.get("primaryDocDescription"),
             raw_text,
             filing_row.get("items"),
+        ):
+            return False
+        if normalized_form_type == "8-K" and not is_material_8k(
+            item_numbers,
+            filing_row.get("primaryDocDescription"),
+            raw_text,
         ):
             return False
 
@@ -551,6 +670,12 @@ class FilingService:
             parsed_sections=parsed_sections,
         )
 
+        event_type = infer_filing_event_type(
+            normalized_form_type,
+            item_numbers,
+            filing_row.get("primaryDocDescription"),
+            raw_text,
+        )
         filing = Filing(
             company_id=company.id,
             accession_number=accession_number,
@@ -570,6 +695,17 @@ class FilingService:
             parsed_sections=parsed_sections,
             raw_artifact_key=raw_key,
             pdf_artifact_key=pdf_key,
+            item_numbers=item_numbers,
+            source_type="official_filing",
+            event_type=event_type,
+            is_official_source=True,
+            dedupe_group_id=filing_dedupe_group_id(
+                company.id,
+                accession_number=accession_number,
+                event_type=event_type,
+                filed_at=self._parse_datetime(filing_row.get("acceptanceDateTime") or filing_row.get("filingDate")),
+            ),
+            freshness_bucket=freshness_bucket(self._parse_datetime(filing_row.get("acceptanceDateTime") or filing_row.get("filingDate"))),
             extra_metadata={
                 "items": filing_row.get("items"),
                 "size": filing_row.get("size"),
@@ -586,6 +722,7 @@ class FilingService:
         if prior:
             filing.prior_comparable_filing_id = prior.id
         filing.summary_status = "pending"
+        filing.summary_tier = "no_ai"
         self._apply_scores(filing, company, prior_filing=prior)
         return True
 
@@ -598,8 +735,9 @@ class FilingService:
     ) -> dict[str, int]:
         budget_service = SummaryBudgetService(self.session)
         remaining_daily = budget_service.remaining("filing") if automated and self.settings.openai_api_key else max(limit or 0, self.settings.max_filing_summaries_per_run)
+        remaining_override = budget_service.remaining("override") if automated and self.settings.openai_api_key else 0
         if automated and self.settings.openai_api_key:
-            effective_limit = min(limit or self.settings.max_filing_summaries_per_run, self.settings.max_filing_summaries_per_run, remaining_daily)
+            effective_limit = min(limit or self.settings.max_filing_summaries_per_run, self.settings.max_filing_summaries_per_run + remaining_override, remaining_daily + remaining_override)
         else:
             effective_limit = limit or self.settings.max_filing_summaries_per_run
 
@@ -609,18 +747,20 @@ class FilingService:
         raw_candidates = self.session.execute(
             select(Filing, Company)
             .join(Company, Filing.company_id == Company.id)
-            .where(Filing.summary_status.in_(["pending", "failed"]), Filing.summary_attempts < 3)
+            .where(Filing.summary_status.in_(["pending", "failed", "stale"]), Filing.summary_attempts < 3)
         ).all()
-        # Sort by materiality-aware priority score instead of composite_score
         market_caps = company_market_cap_percentiles(self.session)
+        watchlist_ids = watchlist_company_ids(self.session)
         candidates = sorted(
             raw_candidates,
-            key=lambda row: summary_priority_score(row[0], market_caps.get(row[1].id, 0.0)),
+            key=lambda row: summary_priority_score(row[0], market_caps.get(row[1].id, 0.0))
+            + (20.0 if row[1].id in watchlist_ids else 0.0),
             reverse=True,
         )
 
         cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
         summarized = 0
+        override_used = 0
         for filing, company in candidates:
             ingest_origin = (filing.extra_metadata or {}).get("ingest_origin")
             if automated and not include_historical and ingest_origin != "sec_poll":
@@ -630,22 +770,75 @@ class FilingService:
                 filed_at = filed_at.replace(tzinfo=UTC)
             if automated and filed_at < cutoff:
                 continue
+            is_override = self._qualifies_for_priority_override(filing, company.id in watchlist_ids)
+            if automated and self.settings.openai_api_key:
+                if remaining_daily <= 0 and (not is_override or remaining_override <= 0):
+                    continue
             prior = self._prior_comparable_filing(company.id, filing)
             try:
-                self._apply_summary(filing, company, prior_filing=prior, trigger="auto" if automated else "manual")
+                summary_tier = self._summary_tier_for_filing(
+                    filing,
+                    automated=automated,
+                    watchlist_match=company.id in watchlist_ids,
+                )
+                self._apply_summary(
+                    filing,
+                    company,
+                    prior_filing=prior,
+                    trigger="auto" if automated else "manual",
+                    summary_tier=summary_tier,
+                )
             except Exception:
                 filing.summary_status = "failed"
                 filing.summary_attempts += 1
                 continue
             summarized += 1
+            if automated and self.settings.openai_api_key:
+                if remaining_daily > 0:
+                    remaining_daily -= 1
+                elif is_override and remaining_override > 0:
+                    remaining_override -= 1
+                    override_used += 1
             if summarized >= effective_limit:
                 break
 
         if automated and self.settings.openai_api_key:
-            budget_service.record("filing", summarized)
+            budget_service.record("filing", summarized - override_used)
+            budget_service.record("override", override_used)
         self.session.commit()
         remaining = budget_service.remaining("filing") if self.settings.openai_api_key else 0
         return {"summarized": summarized, "remaining_daily_budget": remaining}
+
+    def summarize_item(
+        self,
+        filing_id: int,
+        *,
+        consume_override_budget: bool = False,
+        force: bool = False,
+    ) -> dict[str, int | str]:
+        filing = self.session.get(Filing, filing_id)
+        if not filing:
+            raise ValueError(f"Unknown filing id={filing_id}")
+        if not force and filing.summary_status == "complete":
+            return {"status": "already_complete", "remaining_override_budget": self._remaining_override_budget()}
+
+        company = filing.company
+        budget_service = SummaryBudgetService(self.session)
+        if consume_override_budget and self.settings.openai_api_key and budget_service.remaining("override") <= 0:
+            raise RuntimeError("override_budget_exhausted")
+
+        prior = self._prior_comparable_filing(company.id, filing)
+        self._apply_summary(
+            filing,
+            company,
+            prior_filing=prior,
+            trigger="manual",
+            summary_tier="full_ai",
+        )
+        if consume_override_budget and self.settings.openai_api_key:
+            budget_service.record("override", 1)
+        self.session.commit()
+        return {"status": "summarized", "remaining_override_budget": self._remaining_override_budget()}
 
     def rerank_for_companies(self, company_ids: Iterable[int] | None = None) -> int:
         target_ids = sorted({int(company_id) for company_id in (company_ids or [])})
@@ -742,11 +935,19 @@ class FilingService:
         company.market_cap_source = market["source"]
         company.market_cap_updated_at = market["as_of"]
 
-    def _apply_summary(self, filing: Filing, company: Company, *, prior_filing: Filing | None, trigger: str) -> None:
+    def _apply_summary(
+        self,
+        filing: Filing,
+        company: Company,
+        *,
+        prior_filing: Filing | None,
+        trigger: str,
+        summary_tier: str,
+    ) -> None:
         summary = self.summarizer.summarize(
             kind="filing",
             title=filing.title or f"{company.name} {filing.form_type}",
-            text=self._summary_source_text(filing),
+            text=self._summary_source_text(filing, summary_tier=summary_tier),
             company_name=company.name,
             evidence_sections=list((filing.parsed_sections or {}).keys()),
             form_type=filing.form_type,
@@ -755,8 +956,13 @@ class FilingService:
         filing.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
         filing.summary_prompt_version = self.settings.summary_prompt_version
         filing.summary_status = "complete"
+        filing.summary_tier = summary_tier
         filing.summary_attempts += 1
-        filing.extra_metadata = {**(filing.extra_metadata or {}), "summary_trigger": trigger}
+        filing.extra_metadata = {
+            **(filing.extra_metadata or {}),
+            "summary_trigger": trigger,
+            "summary_source_hash": hashlib.sha256(self._summary_source_text(filing, summary_tier="full_ai").encode("utf-8")).hexdigest(),
+        }
         self._apply_scores(filing, company, prior_filing=prior_filing)
 
         # Generate diff analysis for periodic filings with a prior comparable
@@ -809,6 +1015,13 @@ class FilingService:
         filing.composite_score = float(scores["composite_score"])
         filing.score_confidence = str(scores["score_confidence"])
         filing.score_explanation = dict(scores["score_explanation"])
+        filing.freshness_bucket = freshness_bucket(filing.filed_at)
+        filing.priority_reason = filing_priority_reason(
+            filing,
+            company_market_cap_score=filing.market_cap_score,
+            impact_score=filing.impact_score,
+            recency=float((filing.score_explanation or {}).get("components", {}).get("recency", 0.0)),
+        )
 
     def _prior_comparable_filing(self, company_id: int, filing: Filing) -> Filing | None:
         group = comparable_group(filing.normalized_form_type)
@@ -822,11 +1035,15 @@ class FilingService:
                 return candidate
         return None
 
-    def _summary_source_text(self, filing: Filing) -> str:
+    def _summary_source_text(self, filing: Filing, *, summary_tier: str = "full_ai") -> str:
         section_text = []
         for section_name, section_body in filing.parsed_sections.items():
-            section_text.append(f"[{section_name}]\n{section_body[:3000]}")
-        return "\n\n".join(section_text) if section_text else (filing.raw_text or "")[:18000]
+            limit = 1800 if summary_tier == "short_ai" else 3000
+            section_text.append(f"[{section_name}]\n{section_body[:limit]}")
+        if section_text:
+            max_sections = 3 if summary_tier == "short_ai" else len(section_text)
+            return "\n\n".join(section_text[:max_sections])
+        return (filing.raw_text or "")[:8000 if summary_tier == "short_ai" else 18000]
 
     @staticmethod
     def _parse_datetime(raw_value: str | None) -> datetime:
@@ -853,8 +1070,18 @@ class FilingService:
         limit: int = 50,
         company_id: int | None = None,
         recent_days: int | None = None,
+        watchlist_id: int | None = None,
+        sort_mode: str = "importance",
     ) -> list[FilingListItem]:
         query = select(Filing, Company).join(Company, Filing.company_id == Company.id)
+        watchlist_company_match: set[int] = set()
+        if watchlist_id is not None:
+            watchlist = self.session.get(Watchlist, watchlist_id)
+            if watchlist:
+                watchlist_company_match = {int(value) for value in (watchlist.company_ids or [])}
+                query = query.where(Filing.company_id.in_(watchlist_company_match))
+            else:
+                return []
         if company_id:
             query = query.where(Filing.company_id == company_id)
             query = query.order_by(
@@ -862,12 +1089,28 @@ class FilingService:
                 Filing.filed_at.desc(),
                 Filing.composite_score.desc(),
             )
+        elif sort_mode == "freshness":
+            query = query.order_by(Filing.filed_at.desc(), Filing.composite_score.desc())
+        elif sort_mode == "personal":
+            query = query.order_by(Filing.filed_at.desc(), Filing.composite_score.desc())
         else:
             query = query.order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
         if recent_days is not None:
             cutoff = datetime.now(UTC) - timedelta(days=recent_days)
             query = query.where(Filing.filed_at >= cutoff)
-        rows = self.session.execute(query.limit(limit)).all()
+        rows = self.session.execute(query.limit(limit * (3 if watchlist_company_match else 1))).all()
+        if not company_id and sort_mode == "personal":
+            rows = sorted(
+                rows,
+                key=lambda row: personal_relevance_score(
+                    composite_score=row[0].composite_score,
+                    published_at=row[0].filed_at,
+                    is_official_source=True,
+                    watchlist_match=row[1].id in watchlist_company_match if watchlist_company_match else False,
+                    event_type=row[0].event_type,
+                ),
+                reverse=True,
+            )
         return [self._to_list_item(filing, company) for filing, company in rows]
 
     def list_filings_paginated(
@@ -878,13 +1121,25 @@ class FilingService:
         form_type: str | None = None,
         search: str | None = None,
         sort_by: str = "composite_score",
+        recent_days: int | None = None,
+        watchlist_id: int | None = None,
+        sort_mode: str | None = None,
     ) -> dict:
         query = select(Filing, Company).join(Company, Filing.company_id == Company.id)
         count_query = select(func.count()).select_from(Filing).join(Company, Filing.company_id == Company.id)
+        watchlist_company_match: set[int] = set()
 
         if company_id:
             query = query.where(Filing.company_id == company_id)
             count_query = count_query.where(Filing.company_id == company_id)
+        if watchlist_id is not None:
+            watchlist = self.session.get(Watchlist, watchlist_id)
+            if watchlist:
+                watchlist_company_match = {int(value) for value in (watchlist.company_ids or [])}
+                query = query.where(Filing.company_id.in_(watchlist_company_match))
+                count_query = count_query.where(Filing.company_id.in_(watchlist_company_match))
+            else:
+                return {"items": [], "total": 0, "offset": offset, "limit": limit}
         if form_type:
             query = query.where(Filing.normalized_form_type == form_type)
             count_query = count_query.where(Filing.normalized_form_type == form_type)
@@ -893,14 +1148,33 @@ class FilingService:
             search_filter = Filing.title.ilike(pattern) | Company.name.ilike(pattern) | Company.ticker.ilike(pattern)
             query = query.where(search_filter)
             count_query = count_query.where(Filing.title.ilike(pattern) | Company.name.ilike(pattern) | Company.ticker.ilike(pattern))
+        if recent_days is not None:
+            cutoff = datetime.now(UTC) - timedelta(days=recent_days)
+            query = query.where(Filing.filed_at >= cutoff)
+            count_query = count_query.where(Filing.filed_at >= cutoff)
 
-        if sort_by == "filed_at":
+        effective_sort = sort_mode or ("freshness" if sort_by == "filed_at" else "importance")
+        if effective_sort == "freshness":
+            query = query.order_by(Filing.filed_at.desc(), Filing.composite_score.desc())
+        elif effective_sort == "personal":
             query = query.order_by(Filing.filed_at.desc(), Filing.composite_score.desc())
         else:
             query = query.order_by(Filing.composite_score.desc(), Filing.filed_at.desc())
 
         total = self.session.scalar(count_query) or 0
         rows = self.session.execute(query.offset(offset).limit(limit)).all()
+        if effective_sort == "personal":
+            rows = sorted(
+                rows,
+                key=lambda row: personal_relevance_score(
+                    composite_score=row[0].composite_score,
+                    published_at=row[0].filed_at,
+                    is_official_source=True,
+                    watchlist_match=row[1].id in watchlist_company_match if watchlist_company_match else False,
+                    event_type=row[0].event_type,
+                ),
+                reverse=True,
+            )
         items = [self._to_list_item(filing, company) for filing, company in rows]
         return {"items": items, "total": total, "offset": offset, "limit": limit}
 
@@ -948,6 +1222,7 @@ class FilingService:
 
     def _to_list_item(self, filing: Filing, company: Company) -> FilingListItem:
         summary = filing.summary_json or {}
+        summary_text = summary.get("summary") or self._fallback_summary(filing)
         return FilingListItem(
             id=filing.id,
             company_id=company.id,
@@ -964,7 +1239,14 @@ class FilingService:
             composite_score=filing.composite_score,
             score_explanation=filing.score_explanation or {},
             summary_status=filing.summary_status,
-            summary=summary.get("summary", ""),
+            summary_tier=filing.summary_tier or "no_ai",
+            source_type=filing.source_type or "official_filing",
+            event_type=filing.event_type,
+            priority_reason=filing.priority_reason or "",
+            is_official_source=bool(filing.is_official_source),
+            dedupe_group_id=filing.dedupe_group_id,
+            freshness_bucket=filing.freshness_bucket or freshness_bucket(filing.filed_at),
+            summary=summary_text,
             original_document_url=filing.original_document_url,
             pdf_download_url=(
                 f"{self.settings.api_base_url}{self.settings.api_prefix}/artifacts/filings/{filing.id}/pdf"
@@ -972,3 +1254,53 @@ class FilingService:
                 else None
             ),
         )
+
+    def _fallback_summary(self, filing: Filing) -> str:
+        if filing.title and filing.normalized_form_type == "8-K":
+            return filing.title
+        if filing.event_type and filing.title and filing.normalized_form_type in {"8-K", "6-K"}:
+            return f"{filing.event_type.replace('-', ' ').capitalize()}: {filing.title}"
+        if filing.item_numbers and filing.normalized_form_type == "8-K":
+            items = ", ".join(filing.item_numbers[:3])
+            return f"Current event filing covering item {items}."
+        for section_name in ("md&a", "business", "risk_factors", "legal_proceedings", "financial_statements"):
+            section_text = (filing.parsed_sections or {}).get(section_name)
+            if not section_text:
+                continue
+            section_lines = [line.strip() for line in section_text.splitlines() if line.strip()]
+            snippet = ""
+            for line in section_lines:
+                if len(line.split()) <= 8 and _looks_like_heading(line):
+                    continue
+                snippet = line
+                break
+            if not snippet and section_lines:
+                snippet = section_lines[0]
+            if len(snippet) > 240:
+                snippet = snippet[:237].rsplit(" ", 1)[0] + "..."
+            return snippet
+        description = filing.description or filing.title or ""
+        return description[:240]
+
+    @staticmethod
+    def _qualifies_for_priority_override(filing: Filing, watchlist_match: bool) -> bool:
+        return bool(
+            watchlist_match
+            or filing.normalized_form_type == "8-K"
+            or filing.event_type in {"results-of-operations", "acquisition-disposition", "leadership-change", "material-agreement", "regulatory"}
+        )
+
+    @staticmethod
+    def _summary_tier_for_filing(filing: Filing, *, automated: bool, watchlist_match: bool) -> str:
+        if not automated:
+            return "full_ai"
+        if filing.normalized_form_type in {"10-K", "20-F", "40-F", "8-K"}:
+            return "full_ai"
+        if watchlist_match or filing.event_type in {"results-of-operations", "regulatory"}:
+            return "full_ai"
+        return "short_ai"
+
+    def _remaining_override_budget(self) -> int:
+        if not self.settings.openai_api_key:
+            return 0
+        return SummaryBudgetService(self.session).remaining("override")

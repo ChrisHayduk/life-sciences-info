@@ -8,6 +8,7 @@ from app.jobs import (
     run_backfill_company,
     run_build_weekly_digest,
     run_ingest_news,
+    run_poll_regulatory_events,
     run_poll_sec_filings,
     run_refresh_market_caps,
     run_resummarize_item,
@@ -44,6 +45,11 @@ def poll_sec_filings() -> dict[str, int]:
 @dramatiq.actor
 def ingest_news() -> dict[str, int]:
     return run_ingest_news()
+
+
+@dramatiq.actor
+def poll_regulatory_events(limit: int | None = None) -> dict[str, int]:
+    return run_poll_regulatory_events(limit=limit)
 
 
 @dramatiq.actor

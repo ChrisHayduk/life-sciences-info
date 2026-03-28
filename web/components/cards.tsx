@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { ReactNode } from "react";
-import { Building2, ExternalLink, FileText, Globe } from "lucide-react";
+import { Building2, ExternalLink, FileText, Globe, Sparkles } from "lucide-react";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { ClinicalTrial, FilingListItem, NewsItem, formatDate } from "@/lib/api";
+import { ClinicalTrial, FilingListItem, NewsItem, TimelineEvent, formatDate } from "@/lib/api";
+import { AddToWatchlistButton } from "@/components/watchlist-actions";
+import { SummarizeButton } from "@/components/summary-actions";
 
 export function SectionHeader({
   eyebrow,
@@ -42,6 +44,28 @@ export function StatCard({ label, value }: { label: string; value: string | numb
     </Card>
   );
 }
+
+const FRESHNESS_LABELS: Record<string, string> = {
+  last_24h: "24h",
+  last_7d: "7d",
+  last_30d: "30d",
+  last_90d: "90d",
+  stale: "Older",
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  official_filing: "Official filing",
+  official_company_pr: "Company PR",
+  regulator: "Regulator",
+  trade_press: "Trade press",
+  trial_registry: "Trial registry",
+};
+
+const SUMMARY_TIER_LABELS: Record<string, string> = {
+  no_ai: "Rule-based",
+  short_ai: "Quick AI",
+  full_ai: "Full AI",
+};
 
 const SCORE_TOOLTIPS: Record<string, string> = {
   Composite:
@@ -100,18 +124,40 @@ export function FilingCard({ filing }: { filing: FilingListItem }) {
           </Link>
           {filing.ticker ? ` (${filing.ticker})` : ""}
         </p>
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          <Badge variant="outline" className="text-xs font-normal">
+            {SOURCE_LABELS[filing.source_type] ?? filing.source_type}
+          </Badge>
+          <Badge variant="outline" className="text-xs font-normal">
+            {FRESHNESS_LABELS[filing.freshness_bucket] ?? filing.freshness_bucket}
+          </Badge>
+          <Badge variant="outline" className="text-xs font-normal">
+            {SUMMARY_TIER_LABELS[filing.summary_tier] ?? filing.summary_tier}
+          </Badge>
+          {filing.event_type ? (
+            <Badge variant="outline" className="text-xs font-normal">
+              {filing.event_type.replaceAll("-", " ")}
+            </Badge>
+          ) : null}
+        </div>
       </CardHeader>
       <CardContent className="px-5 pb-5 space-y-3">
         <p className="text-sm leading-relaxed">{filing.summary || "Summary pending."}</p>
+        {filing.priority_reason ? (
+          <p className="text-xs text-muted-foreground">
+            Why it is ranked here: {filing.priority_reason}.
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-1.5">
           <ScorePill label="Composite" value={filing.composite_score} />
           <ScorePill label="Impact" value={filing.impact_score} />
           <ScorePill label="Mkt Cap" value={filing.market_cap_score} />
         </div>
-        <div className="flex flex-wrap gap-3 pt-1">
+        <div className="flex flex-wrap gap-3 pt-1 items-center">
           <Link href={`/filings/${filing.id}`} className="inline-flex items-center gap-1 text-sm font-semibold text-primary hover:text-primary/80">
             <FileText className="size-3.5" /> Open filing
           </Link>
+          <SummarizeButton kind="filing" itemId={filing.id} summaryStatus={filing.summary_status} />
           <a
             href={filing.pdf_download_url ?? filing.original_document_url}
             target="_blank"
@@ -128,6 +174,7 @@ export function FilingCard({ filing }: { filing: FilingListItem }) {
           >
             <Globe className="size-3.5" /> SEC source
           </a>
+          <AddToWatchlistButton companyIds={[filing.company_id]} label="Track company" />
         </div>
       </CardContent>
     </Card>
@@ -165,9 +212,30 @@ export function NewsCard({ item }: { item: NewsItem }) {
             })}
           </div>
         )}
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          <Badge variant="outline" className="text-xs font-normal">
+            {SOURCE_LABELS[item.source_type] ?? item.source_type}
+          </Badge>
+          <Badge variant="outline" className="text-xs font-normal">
+            {FRESHNESS_LABELS[item.freshness_bucket] ?? item.freshness_bucket}
+          </Badge>
+          <Badge variant="outline" className="text-xs font-normal">
+            {SUMMARY_TIER_LABELS[item.summary_tier] ?? item.summary_tier}
+          </Badge>
+          {item.event_type ? (
+            <Badge variant="outline" className="text-xs font-normal">
+              {item.event_type.replaceAll("-", " ")}
+            </Badge>
+          ) : null}
+        </div>
       </CardHeader>
       <CardContent className="px-5 pb-5 space-y-3">
         <p className="text-sm leading-relaxed">{item.summary || item.excerpt || "Summary pending."}</p>
+        {item.priority_reason ? (
+          <p className="text-xs text-muted-foreground">
+            Why it is ranked here: {item.priority_reason}.
+          </p>
+        ) : null}
         {item.topic_tags.length > 0 && (
           <div className="flex flex-wrap gap-1.5">
             {item.topic_tags.map((tag) => (
@@ -181,7 +249,7 @@ export function NewsCard({ item }: { item: NewsItem }) {
           <ScorePill label="Composite" value={item.composite_score} />
           <ScorePill label="Importance" value={item.importance_score} />
         </div>
-        <div className="flex flex-wrap gap-3 pt-1">
+        <div className="flex flex-wrap gap-3 pt-1 items-center">
           <a
             href={item.canonical_url}
             target="_blank"
@@ -190,6 +258,10 @@ export function NewsCard({ item }: { item: NewsItem }) {
           >
             <ExternalLink className="size-3.5" /> Open article
           </a>
+          <SummarizeButton kind="news" itemId={item.id} summaryStatus={item.summary_status} />
+          {item.company_tag_ids.length > 0 ? (
+            <AddToWatchlistButton companyIds={item.company_tag_ids} label="Track companies" />
+          ) : null}
         </div>
       </CardContent>
     </Card>
@@ -255,6 +327,59 @@ export function EmptyPanel({ title, body }: { title: string; body: string }) {
       <CardContent className="p-8 text-center">
         <h3 className="text-lg font-semibold">{title}</h3>
         <p className="text-sm text-muted-foreground mt-2">{body}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+export function TimelineEventCard({ event }: { event: TimelineEvent }) {
+  return (
+    <Card className="border-border/50">
+      <CardContent className="p-4 space-y-2">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              <Badge variant="secondary" className="text-xs">
+                {event.item_type}
+              </Badge>
+              <Badge variant="outline" className="text-xs font-normal">
+                {SOURCE_LABELS[event.source_type] ?? event.source_type}
+              </Badge>
+              <Badge variant="outline" className="text-xs font-normal">
+                {FRESHNESS_LABELS[event.freshness_bucket] ?? event.freshness_bucket}
+              </Badge>
+            </div>
+            <h3 className="text-sm font-semibold leading-snug">{event.title}</h3>
+            <p className="text-xs text-muted-foreground mt-1">{formatDate(event.occurred_at)}</p>
+          </div>
+          {event.summary_tier !== "no_ai" ? (
+            <Sparkles className="size-4 text-muted-foreground" />
+          ) : null}
+        </div>
+        <p className="text-sm leading-relaxed">{event.summary || event.priority_reason}</p>
+        {event.priority_reason ? (
+          <p className="text-xs text-muted-foreground">Why now: {event.priority_reason}.</p>
+        ) : null}
+        <div className="flex flex-wrap gap-3 pt-1 items-center">
+          {event.href ? (
+            <Link href={event.href} className="inline-flex items-center gap-1 text-sm font-semibold text-primary hover:text-primary/80">
+              <FileText className="size-3.5" /> Open in app
+            </Link>
+          ) : null}
+          {event.external_url ? (
+            <a
+              href={event.external_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sm font-semibold text-primary hover:text-primary/80"
+            >
+              <ExternalLink className="size-3.5" /> Source
+            </a>
+          ) : null}
+          {event.company_ids.length > 0 ? (
+            <AddToWatchlistButton companyIds={event.company_ids} label="Track" />
+          ) : null}
+        </div>
       </CardContent>
     </Card>
   );

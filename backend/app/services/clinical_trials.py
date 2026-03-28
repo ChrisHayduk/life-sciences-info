@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timezone
+from time import sleep
 from typing import Any
 
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models import ClinicalTrial, Company
 
 logger = logging.getLogger(__name__)
@@ -40,10 +42,22 @@ def _parse_date(value: str | None) -> date | None:
     return None
 
 
+class ClinicalTrialsAccessBlocked(RuntimeError):
+    """Raised when ClinicalTrials.gov blocks the current client/request pattern."""
+
+
 class ClinicalTrialsService:
     def __init__(self, session: Session, http_client: httpx.Client | None = None) -> None:
         self.session = session
-        self.http_client = http_client or httpx.Client(timeout=30.0)
+        self.settings = get_settings()
+        self.http_client = http_client or httpx.Client(
+            timeout=self.settings.source_fetch_timeout_seconds,
+            follow_redirects=True,
+            headers={
+                "User-Agent": self.settings.sec_user_agent,
+                "Accept": "application/json",
+            },
+        )
 
     def poll_trials_for_company(self, company: Company, max_results: int = 50) -> dict[str, int]:
         """Fetch trials from ClinicalTrials.gov where the company is a sponsor."""
@@ -55,10 +69,17 @@ class ClinicalTrialsService:
 
         new_count = 0
         updated_count = 0
+        blocked = False
 
-        for sponsor_name in sponsor_names[:3]:  # Limit to avoid too many API calls
+        for index, sponsor_name in enumerate(sponsor_names[:3]):  # Limit to avoid too many API calls
+            if index > 0 and self.settings.sec_rate_limit_delay_seconds > 0:
+                sleep(self.settings.sec_rate_limit_delay_seconds)
             try:
                 studies = self._search_studies(sponsor_name, max_results=max_results)
+            except ClinicalTrialsAccessBlocked as exc:
+                logger.warning("ClinicalTrials.gov blocked sponsor query for %s: %s", sponsor_name, exc)
+                blocked = True
+                break
             except Exception as exc:
                 logger.warning("Failed to fetch trials for %s: %s", sponsor_name, exc)
                 continue
@@ -71,7 +92,7 @@ class ClinicalTrialsService:
                     updated_count += 1
 
         self.session.commit()
-        return {"new": new_count, "updated": updated_count, "company_id": company.id}
+        return {"new": new_count, "updated": updated_count, "company_id": company.id, "blocked": int(blocked)}
 
     def poll_all_companies(self, limit: int | None = None) -> dict[str, int]:
         """Poll ClinicalTrials.gov for all active companies."""
@@ -82,12 +103,27 @@ class ClinicalTrialsService:
 
         total_new = 0
         total_updated = 0
+        companies_polled = 0
+        blocked = 0
         for company in companies:
             result = self.poll_trials_for_company(company, max_results=20)
+            companies_polled += 1
             total_new += result["new"]
             total_updated += result["updated"]
+            if result.get("blocked"):
+                blocked = 1
+                logger.warning(
+                    "Aborting ClinicalTrials.gov polling after provider returned 403. "
+                    "Check request headers, outbound IP reputation, or provider-side blocking."
+                )
+                break
 
-        return {"companies_polled": len(companies), "new_trials": total_new, "updated_trials": total_updated}
+        return {
+            "companies_polled": companies_polled,
+            "new_trials": total_new,
+            "updated_trials": total_updated,
+            "blocked": blocked,
+        }
 
     def list_trials(
         self,
@@ -164,6 +200,8 @@ class ClinicalTrialsService:
             ),
         }
         response = self.http_client.get(f"{CT_API_BASE}/studies", params=params)
+        if response.status_code == 403:
+            raise ClinicalTrialsAccessBlocked("403 Forbidden")
         response.raise_for_status()
         data = response.json()
         return data.get("studies", [])

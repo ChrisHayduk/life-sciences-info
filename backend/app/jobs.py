@@ -167,6 +167,7 @@ def run_poll_trials(*, limit: int | None = None) -> dict[str, int]:
         "companies_polled": int(result["companies_polled"]),
         "new_trials": int(result["new_trials"]),
         "updated_trials": int(result["updated_trials"]),
+        "blocked": int(result.get("blocked") or 0),
     }
 
 
@@ -539,7 +540,8 @@ def main() -> None:
         result = run_poll_trials(limit=args.limit)
         print(
             f"Polled {result['companies_polled']} companies; "
-            f"{result['new_trials']} new trials, {result['updated_trials']} updated",
+            f"{result['new_trials']} new trials, {result['updated_trials']} updated"
+            + ("; provider blocked additional requests" if result["blocked"] else ""),
             flush=True,
         )
         return

@@ -14,6 +14,7 @@ from app.jobs import (
     run_ingest_news,
     run_poll_regulatory_events,
     run_poll_sec_filings,
+    run_poll_trials,
     run_refresh_market_caps,
     run_resummarize_item,
     run_retag_news_companies,
@@ -508,12 +509,13 @@ def admin_resummarize(kind: str, item_id: int) -> AdminActionResponse:
 
 @router.post("/admin/poll-trials", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
 def admin_poll_trials(limit: int | None = None, session: Session = Depends(get_session)) -> AdminActionResponse:
-    result = ClinicalTrialsService(session).poll_all_companies(limit=limit)
+    result = run_poll_trials(limit=limit)
     return AdminActionResponse(
         status="ok",
         message=(
             f"Polled {result['companies_polled']} companies; "
             f"{result['new_trials']} new trials, {result['updated_trials']} updated."
+            + (" ClinicalTrials.gov blocked additional requests during this run." if result["blocked"] else "")
         ),
     )
 

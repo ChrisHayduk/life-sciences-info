@@ -183,22 +183,92 @@ def test_run_retag_news_companies_returns_scan_update_counts(db_session, monkeyp
     assert result == {"scanned": 12, "updated": 5, "reranked": 12}
 
 
-def test_run_poll_trials_returns_company_and_trial_counts(db_session, monkeypatch):
+def test_run_poll_trials_returns_company_and_trial_counts(db_session, company, monkeypatch):
+    other = SimpleNamespace(
+        id=99,
+        cik="0000000999",
+        ticker="ZZZZ",
+        name="Zeta Bio",
+        market_cap=9_000_000_000,
+        is_active=True,
+    )
+
     class FakeClinicalTrialsService:
         def __init__(self, session):
             self.session = session
 
-        def poll_all_companies(self, limit=None):
-            assert limit == 15
-            return {"companies_polled": 15, "new_trials": 9, "updated_trials": 4, "blocked": 1}
+        def poll_companies(self, companies):
+            assert [item.ticker for item in companies] == ["ZZZZ"]
+            return {
+                "provider": "aact_cloud",
+                "companies_scanned": 1,
+                "companies_succeeded": 1,
+                "companies_failed": 0,
+                "new_trials": 9,
+                "updated_trials": 4,
+                "pruned_trials": 2,
+                "partial": 0,
+                "skipped": 0,
+            }
 
     monkeypatch.setattr("app.jobs.init_db", lambda: None)
     monkeypatch.setattr("app.jobs.SessionLocal", lambda: db_session)
+    monkeypatch.setattr(jobs, "_load_active_companies", lambda session, focus_tickers=None: [other, company])
     monkeypatch.setattr("app.jobs.ClinicalTrialsService", FakeClinicalTrialsService)
 
-    result = jobs.run_poll_trials(limit=15)
+    result = jobs.run_poll_trials(limit=1)
 
-    assert result == {"companies_polled": 15, "new_trials": 9, "updated_trials": 4, "blocked": 1}
+    assert result == {
+        "provider": "aact_cloud",
+        "companies_scanned": 1,
+        "companies_succeeded": 1,
+        "companies_failed": 0,
+        "new_trials": 9,
+        "updated_trials": 4,
+        "pruned_trials": 2,
+        "partial": 0,
+        "skipped": 0,
+    }
+
+
+def test_run_poll_trials_respects_focus_tickers(db_session, company, monkeypatch):
+    other = SimpleNamespace(
+        id=77,
+        cik="0000000777",
+        ticker="BMED",
+        name="Beta Med",
+        market_cap=500_000_000,
+        is_active=True,
+    )
+
+    class FakeClinicalTrialsService:
+        captured = []
+
+        def __init__(self, session):
+            self.session = session
+
+        def poll_companies(self, companies):
+            FakeClinicalTrialsService.captured = [item.ticker for item in companies]
+            return {
+                "provider": "aact_cloud",
+                "companies_scanned": len(FakeClinicalTrialsService.captured),
+                "companies_succeeded": len(FakeClinicalTrialsService.captured),
+                "companies_failed": 0,
+                "new_trials": 0,
+                "updated_trials": 0,
+                "pruned_trials": 0,
+                "partial": 0,
+                "skipped": 0,
+            }
+
+    monkeypatch.setattr("app.jobs.init_db", lambda: None)
+    monkeypatch.setattr("app.jobs.SessionLocal", lambda: db_session)
+    monkeypatch.setattr(jobs, "_load_active_companies", lambda session, focus_tickers=None: [company] if focus_tickers == ["ABIO"] else [company, other])
+    monkeypatch.setattr("app.jobs.ClinicalTrialsService", FakeClinicalTrialsService)
+
+    jobs.run_poll_trials(focus_tickers=["ABIO"])
+
+    assert FakeClinicalTrialsService.captured == ["ABIO"]
 
 
 def test_run_resummarize_item_uses_service_level_manual_summary(db_session, monkeypatch):

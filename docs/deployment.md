@@ -45,6 +45,7 @@ You should already have:
 
 - an OpenAI API key
 - an FMP API key if using live market caps
+- AACT cloud database credentials for production clinical-trial syncing
 - a Render account
 - a Vercel account
 - a Cloudflare account with R2 enabled
@@ -168,6 +169,33 @@ Optional compatibility fallback:
 
 - `ALPHA_VANTAGE_API_KEY`
 - `ALPHA_VANTAGE_BASE_URL`
+
+#### Clinical trials
+
+- `CLINICAL_TRIALS_PROVIDER`
+- `AACT_DB_HOST`
+- `AACT_DB_PORT`
+- `AACT_DB_NAME`
+- `AACT_DB_USER`
+- `AACT_DB_PASSWORD`
+- `CLINICAL_TRIALS_RECENT_DAYS`
+
+Recommended defaults:
+
+- `CLINICAL_TRIALS_PROVIDER=aact_cloud`
+- `AACT_DB_HOST=aact-db.ctti-clinicaltrials.org`
+- `AACT_DB_PORT=5432`
+- `AACT_DB_NAME=aact`
+- `CLINICAL_TRIALS_RECENT_DAYS=730`
+
+Legacy/manual fallback:
+
+- `CLINICAL_TRIALS_PROVIDER=ctgov_api`
+
+Production note:
+
+- The app is now designed to use the AACT cloud database as the primary trial source on Render.
+- Direct ClinicalTrials.gov API polling remains available as a fallback/debug path, but it is not the recommended production mode.
 
 #### Object storage
 
@@ -363,7 +391,16 @@ These events show up in:
 
 ### Trials
 
-Trial data comes from ClinicalTrials.gov v2 and is linked to companies by sponsor matching.
+Trial data is intended to come from the AACT cloud database, which mirrors ClinicalTrials.gov in a database-friendly form.
+
+The production sync:
+
+- queries AACT directly per company
+- matches against canonical names, aliases, and optional `extra_metadata["trial_sponsor_aliases"]`
+- keeps only current and recent studies in the primary app table
+- skips cleanly without deleting existing rows if the provider is misconfigured or a company-level sync fails
+
+The direct ClinicalTrials.gov API remains available as `CLINICAL_TRIALS_PROVIDER=ctgov_api` for fallback/debug use, but it is not the recommended production path on Render.
 
 ## Manual Operations You Will Actually Use
 
@@ -410,6 +447,7 @@ python -m app.jobs retag-news-companies --all
 ```bash
 python -m app.jobs poll-regulatory-events
 python -m app.jobs poll-trials
+python -m app.jobs poll-trials --focus-tickers MRK,PFE
 ```
 
 ### Budget-aware backlog work

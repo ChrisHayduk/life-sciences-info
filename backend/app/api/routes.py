@@ -508,14 +508,22 @@ def admin_resummarize(kind: str, item_id: int) -> AdminActionResponse:
 
 
 @router.post("/admin/poll-trials", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
-def admin_poll_trials(limit: int | None = None, session: Session = Depends(get_session)) -> AdminActionResponse:
-    result = run_poll_trials(limit=limit)
+def admin_poll_trials(limit: int | None = None, focus_tickers: str = "") -> AdminActionResponse:
+    tickers = [ticker.strip().upper() for ticker in focus_tickers.split(",") if ticker.strip()]
+    result = run_poll_trials(limit=limit, focus_tickers=tickers or None)
+    if result["skipped"]:
+        return AdminActionResponse(
+            status="ok",
+            message=f"Skipped trial sync for provider {result['provider']}; provider is not configured.",
+        )
     return AdminActionResponse(
         status="ok",
         message=(
-            f"Polled {result['companies_polled']} companies; "
-            f"{result['new_trials']} new trials, {result['updated_trials']} updated."
-            + (" ClinicalTrials.gov blocked additional requests during this run." if result["blocked"] else "")
+            f"Provider {result['provider']}: scanned {result['companies_scanned']} companies; "
+            f"{result['companies_succeeded']} succeeded, {result['companies_failed']} failed; "
+            f"{result['new_trials']} new trials, {result['updated_trials']} updated, "
+            f"{result['pruned_trials']} pruned."
+            + (" Run was partial." if result["partial"] else "")
         ),
     )
 

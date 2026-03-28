@@ -7,7 +7,7 @@ The product is organized around two loops:
 - Global awareness through a dashboard that separates `what changed today` from `what matters this week`
 - Focused follow-up through watchlists and company pages
 
-The app combines SEC filings, public industry news, official company IR updates, FDA advisory-calendar events, and ClinicalTrials.gov data into one ranked workflow with lightweight AI summaries and strict cost controls.
+The app combines SEC filings, public industry news, official company IR updates, FDA advisory-calendar events, and AACT-backed ClinicalTrials.gov data into one ranked workflow with lightweight AI summaries and strict cost controls.
 
 ## What The Product Does
 
@@ -18,7 +18,7 @@ The app combines SEC filings, public industry news, official company IR updates,
   - most important filings and news for the current week window
   - watchlist highlights
   - upcoming FDA regulatory events
-  - recent ClinicalTrials.gov updates
+  - recent clinical-trial updates
   - latest weekly digest
   - AI budget and queue status
 - `Watchlists`
@@ -30,13 +30,13 @@ The app combines SEC filings, public industry news, official company IR updates,
   - recent news
   - catalyst summary
   - merged filing/news/trial/regulatory timeline
-  - pipeline grouped from ClinicalTrials.gov
+  - pipeline grouped from AACT-backed ClinicalTrials.gov data
 - `Filings`
   - searchable filings archive with freshness and importance sorting
 - `News`
   - ranked news archive with source, freshness, and personal relevance filters
 - `Trials`
-  - ClinicalTrials.gov archive linked to covered companies
+  - current and recent clinical-trial archive linked to covered companies
 - `Digests`
   - weekly in-app briefings assembled from stored items and summaries
 
@@ -60,7 +60,8 @@ The app combines SEC filings, public industry news, official company IR updates,
   - starter built-in support for selected large-cap names
   - per-company overrides via `extra_metadata["ir_feed_url"]`, `extra_metadata["ir_news_page_url"]`, or `extra_metadata["ir_sources"]`
 - FDA advisory-calendar events as a dedicated structured source
-- ClinicalTrials.gov v2 trial data
+- AACT cloud database as the primary ClinicalTrials.gov mirror for production trial sync
+- optional direct ClinicalTrials.gov v2 API fallback for manual/debug use
 
 ## How The Pipeline Works
 
@@ -71,7 +72,7 @@ The repo is intentionally optimized for low recurring cost.
 - SEC metadata and filing documents
 - article bodies and feed metadata
 - regulatory calendar metadata
-- clinical trial records
+- clinical trial records from the configured trial provider
 - company tagging and raw artifacts
 
 ### Tier 2: cheap enrichment
@@ -275,6 +276,7 @@ python -m app.jobs poll-sec-filings
 python -m app.jobs ingest-news
 python -m app.jobs poll-regulatory-events
 python -m app.jobs poll-trials
+python -m app.jobs poll-trials --focus-tickers MRK,PFE
 python -m app.jobs build-weekly-digest
 ```
 
@@ -298,7 +300,7 @@ Key behavior to know:
 - `poll-sec-filings` discovers only new filings and summarizes only within budget
 - `ingest-news` ingests only new stories and summarizes only within budget
 - `poll-regulatory-events` syncs FDA advisory-calendar events
-- `poll-trials` pulls ClinicalTrials.gov updates for the covered company set
+- `poll-trials` syncs current and recent trials through the configured provider, with `aact_cloud` as the intended production default
 
 ## Current Scheduler Behavior
 
@@ -309,7 +311,7 @@ Scheduled jobs:
 - SEC filing polling every 30 minutes
 - news ingestion every 6 hours
 - FDA regulatory-event polling every 12 hours
-- ClinicalTrials.gov polling every 7 days
+- trial polling every 7 days through the configured provider
 - universe sync every 7 days
 - market-cap refresh every 7 days
 - weekly digest build on the configured weekday/time
@@ -327,6 +329,8 @@ Important operational note:
 - `OPENAI_API_KEY`
 - `MARKET_DATA_PROVIDER`
 - `FMP_API_KEY` when `MARKET_DATA_PROVIDER=fmp`
+- `CLINICAL_TRIALS_PROVIDER`
+- `AACT_DB_USER` and `AACT_DB_PASSWORD` when `CLINICAL_TRIALS_PROVIDER=aact_cloud`
 - `OBJECT_STORE_ENDPOINT_URL`
 - `OBJECT_STORE_ACCESS_KEY_ID`
 - `OBJECT_STORE_SECRET_ACCESS_KEY`
@@ -342,6 +346,10 @@ Important operational note:
 - `ENABLE_BROWSER_PDF_RENDERING=true`
 - `OBJECT_STORE_REGION=auto` for Cloudflare R2
 - `OPENAI_MODEL=gpt-5-mini`
+- `CLINICAL_TRIALS_PROVIDER=aact_cloud`
+- `AACT_DB_HOST=aact-db.ctti-clinicaltrials.org`
+- `AACT_DB_PORT=5432`
+- `AACT_DB_NAME=aact`
 
 ### Cost-control env vars
 
@@ -362,6 +370,10 @@ Important operational note:
 - `FMP_BASE_URL`
 - `ALPHA_VANTAGE_API_KEY`
 - `ALPHA_VANTAGE_BASE_URL`
+- `AACT_DB_HOST`
+- `AACT_DB_PORT`
+- `AACT_DB_NAME`
+- `CLINICAL_TRIALS_RECENT_DAYS`
 - `REDIS_URL`
 - `LOCAL_ARTIFACT_DIR`
 - `BROWSER_PDF_TIMEOUT_SECONDS`
@@ -419,6 +431,8 @@ Useful admin endpoints include:
 - If object storage is not configured, artifacts fall back to the local filesystem.
 - If `OPENAI_API_KEY` is missing, the backend falls back to deterministic local summaries.
 - `MARKET_DATA_PROVIDER=fmp` is the intended production default.
+- `CLINICAL_TRIALS_PROVIDER=aact_cloud` is the intended production default for trials.
+- If AACT credentials are missing, trial sync skips cleanly and leaves existing trial rows untouched.
 - Market-data failures do not block SEC or news ingestion.
 - Historical backfills queue summaries rather than spending AI immediately.
 - Company pages and watchlist briefings now use explicit company tagging for news instead of loose string matching.

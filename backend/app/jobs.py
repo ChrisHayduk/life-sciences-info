@@ -158,16 +158,23 @@ def run_poll_regulatory_events(*, limit: int | None = None) -> dict[str, int]:
     }
 
 
-def run_poll_trials(*, limit: int | None = None) -> dict[str, int]:
+def run_poll_trials(*, limit: int | None = None, focus_tickers: list[str] | None = None) -> dict[str, int | str]:
     def _run(session):
-        return ClinicalTrialsService(session).poll_all_companies(limit=limit)
+        companies = _load_active_companies(session, focus_tickers=focus_tickers)
+        selected = companies[:limit] if limit else companies
+        return ClinicalTrialsService(session).poll_companies(selected)
 
     result = _with_session(_run)
     return {
-        "companies_polled": int(result["companies_polled"]),
+        "provider": str(result["provider"]),
+        "companies_scanned": int(result["companies_scanned"]),
+        "companies_succeeded": int(result["companies_succeeded"]),
+        "companies_failed": int(result["companies_failed"]),
         "new_trials": int(result["new_trials"]),
         "updated_trials": int(result["updated_trials"]),
-        "blocked": int(result.get("blocked") or 0),
+        "pruned_trials": int(result.get("pruned_trials") or 0),
+        "partial": int(result.get("partial") or 0),
+        "skipped": int(result.get("skipped") or 0),
     }
 
 
@@ -407,9 +414,14 @@ def main() -> None:
     poll_regulatory_parser.add_argument("--limit", type=int, default=None)
     poll_trials_parser = subparsers.add_parser(
         "poll-trials",
-        help="Pull ClinicalTrials.gov data for covered companies.",
+        help="Pull trial data for covered companies using the configured trial provider.",
     )
     poll_trials_parser.add_argument("--limit", type=int, default=None)
+    poll_trials_parser.add_argument(
+        "--focus-tickers",
+        default="",
+        help="Comma-separated tickers to constrain the target set, e.g. MRK,PFE,AMGN",
+    )
     retag_news_parser = subparsers.add_parser(
         "retag-news-companies",
         help="Normalize explicit company tags for stored news items and rerank affected stories.",
@@ -537,11 +549,20 @@ def main() -> None:
         )
         return
     if args.command == "poll-trials":
-        result = run_poll_trials(limit=args.limit)
+        focus_tickers = [ticker.strip().upper() for ticker in args.focus_tickers.split(",") if ticker.strip()]
+        result = run_poll_trials(limit=args.limit, focus_tickers=focus_tickers or None)
+        if result["skipped"]:
+            print(
+                f"Skipped trial sync for provider {result['provider']}; provider is not configured.",
+                flush=True,
+            )
+            return
         print(
-            f"Polled {result['companies_polled']} companies; "
-            f"{result['new_trials']} new trials, {result['updated_trials']} updated"
-            + ("; provider blocked additional requests" if result["blocked"] else ""),
+            f"Provider {result['provider']}: scanned {result['companies_scanned']} companies; "
+            f"{result['companies_succeeded']} succeeded, {result['companies_failed']} failed; "
+            f"{result['new_trials']} new trials, {result['updated_trials']} updated, "
+            f"{result['pruned_trials']} pruned"
+            + ("; run was partial" if result["partial"] else ""),
             flush=True,
         )
         return

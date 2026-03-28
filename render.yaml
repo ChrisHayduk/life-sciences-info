@@ -19,6 +19,10 @@ services:
         value: gpt-5-mini
       - key: MARKET_DATA_PROVIDER
         value: fmp
+      - key: CLINICAL_TRIALS_PROVIDER
+        value: aact_cloud
+      - key: CLINICAL_TRIALS_RECENT_DAYS
+        value: "730"
       - key: OBJECT_STORE_REGION
         value: auto
       - key: ENABLE_SCHEDULER
@@ -54,6 +58,16 @@ services:
       - key: FMP_BASE_URL
         value: https://financialmodelingprep.com/stable
       - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+      - key: AACT_DB_HOST
+        value: aact-db.ctti-clinicaltrials.org
+      - key: AACT_DB_PORT
+        value: "5432"
+      - key: AACT_DB_NAME
+        value: aact
+      - key: AACT_DB_USER
+        sync: false
+      - key: AACT_DB_PASSWORD
         sync: false
       - key: OBJECT_STORE_ENDPOINT_URL
         sync: false

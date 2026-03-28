@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -12,6 +12,17 @@ from app.services.clinical_trials import ClinicalTrialsService
 from app.services.filings import FilingService
 from app.services.news import NewsService
 from app.services.regulatory_events import RegulatoryEventService
+
+
+def _coerce_timeline_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if isinstance(value, date):
+        return datetime.combine(value, datetime.min.time(), tzinfo=UTC)
+    if isinstance(value, str) and value:
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    return datetime.now(UTC)
 
 
 class WatchlistService:
@@ -261,7 +272,7 @@ class WatchlistService:
             if company_ids and trial_company_ids and not set(trial_company_ids).intersection(company_ids):
                 continue
             trial_date = trial.get("last_update_date") or trial.get("primary_completion_date") or trial.get("start_date")
-            occurred_at = datetime.fromisoformat(trial_date).replace(tzinfo=UTC) if trial_date else datetime.now(UTC)
+            occurred_at = _coerce_timeline_datetime(trial_date)
             tags = [value for value in [trial.get("phase"), trial.get("status")] if value]
             events.append(
                 {

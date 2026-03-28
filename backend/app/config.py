@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     openai_api_base: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-5-mini"
     market_data_provider: Literal["fmp", "alpha_vantage", "none"] = "fmp"
+    clinical_trials_provider: Literal["aact_cloud", "ctgov_api", "none"] = "aact_cloud"
+    aact_db_host: str = "aact-db.ctti-clinicaltrials.org"
+    aact_db_port: int = 5432
+    aact_db_name: str = "aact"
+    aact_db_user: str | None = None
+    aact_db_password: str | None = None
+    clinical_trials_recent_days: int = 730
     fmp_api_key: str | None = None
     fmp_base_url: str = "https://financialmodelingprep.com/stable"
     alpha_vantage_api_key: str | None = None
@@ -88,6 +95,13 @@ class Settings(BaseSettings):
     def normalize_market_data_provider(cls, value):
         if value is None or value == "":
             return "fmp"
+        return str(value).strip().lower()
+
+    @field_validator("clinical_trials_provider", mode="before")
+    @classmethod
+    def normalize_clinical_trials_provider(cls, value):
+        if value is None or value == "":
+            return "aact_cloud"
         return str(value).strip().lower()
 
 

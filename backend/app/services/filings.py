@@ -39,7 +39,7 @@ from app.services.ranking import (
 from app.services.sec import SECClient
 from app.services.storage import ObjectStore
 from app.services.summary_budget import SummaryBudgetService
-from app.services.summarization import OpenAISummarizer
+from app.services.summarization import OpenAISummarizer, UsageMetrics
 
 INLINE_XBRL_TAGS = {"ix:nonnumeric", "ix:nonfraction", "ix:continuation", "ix:footnote"}
 DROP_TAGS = {
@@ -734,15 +734,20 @@ class FilingService:
         include_historical: bool = False,
     ) -> dict[str, int]:
         budget_service = SummaryBudgetService(self.session)
-        remaining_daily = budget_service.remaining("filing") if automated and self.settings.openai_api_key else max(limit or 0, self.settings.max_filing_summaries_per_run)
+        remaining_daily = (
+            budget_service.remaining("filing")
+            if automated and self.settings.openai_api_key
+            else max(limit or 0, self.settings.max_filing_summaries_per_run)
+        )
         remaining_override = budget_service.remaining("override") if automated and self.settings.openai_api_key else 0
-        if automated and self.settings.openai_api_key:
-            effective_limit = min(limit or self.settings.max_filing_summaries_per_run, self.settings.max_filing_summaries_per_run + remaining_override, remaining_daily + remaining_override)
-        else:
-            effective_limit = limit or self.settings.max_filing_summaries_per_run
+        effective_limit = limit or self.settings.max_filing_summaries_per_run
 
         if effective_limit <= 0:
-            return {"summarized": 0, "remaining_daily_budget": remaining_daily}
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": remaining_daily,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("filing"), 4) if self.settings.openai_api_key else 0.0,
+            }
 
         raw_candidates = self.session.execute(
             select(Filing, Company)
@@ -760,7 +765,6 @@ class FilingService:
 
         cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
         summarized = 0
-        override_used = 0
         for filing, company in candidates:
             ingest_origin = (filing.extra_metadata or {}).get("ingest_origin")
             if automated and not include_historical and ingest_origin != "sec_poll":
@@ -772,42 +776,52 @@ class FilingService:
                 continue
             is_override = self._qualifies_for_priority_override(filing, company.id in watchlist_ids)
             if automated and self.settings.openai_api_key:
-                if remaining_daily <= 0 and (not is_override or remaining_override <= 0):
+                budget_kind = self._select_automated_budget_kind(
+                    budget_service,
+                    primary_kind="filing",
+                    allow_override=is_override,
+                )
+                if budget_kind is None:
                     continue
+            else:
+                budget_kind = "filing"
             prior = self._prior_comparable_filing(company.id, filing)
             try:
-                summary_tier = self._summary_tier_for_filing(
+                preferred_tier = self._summary_tier_for_filing(
                     filing,
                     automated=automated,
                     watchlist_match=company.id in watchlist_ids,
                 )
+                summary_tier = self._resolve_summary_tier(
+                    budget_service,
+                    preferred_tier=preferred_tier,
+                    automated=automated,
+                )
+                if summary_tier is None:
+                    continue
                 self._apply_summary(
                     filing,
                     company,
                     prior_filing=prior,
                     trigger="auto" if automated else "manual",
                     summary_tier=summary_tier,
+                    budget_kind=budget_kind,
                 )
             except Exception:
                 filing.summary_status = "failed"
                 filing.summary_attempts += 1
                 continue
             summarized += 1
-            if automated and self.settings.openai_api_key:
-                if remaining_daily > 0:
-                    remaining_daily -= 1
-                elif is_override and remaining_override > 0:
-                    remaining_override -= 1
-                    override_used += 1
             if summarized >= effective_limit:
                 break
 
-        if automated and self.settings.openai_api_key:
-            budget_service.record("filing", summarized - override_used)
-            budget_service.record("override", override_used)
         self.session.commit()
         remaining = budget_service.remaining("filing") if self.settings.openai_api_key else 0
-        return {"summarized": summarized, "remaining_daily_budget": remaining}
+        return {
+            "summarized": summarized,
+            "remaining_daily_budget": remaining,
+            "remaining_daily_budget_usd": round(budget_service.remaining_usd("filing"), 4) if self.settings.openai_api_key else 0.0,
+        }
 
     def summarize_item(
         self,
@@ -824,7 +838,7 @@ class FilingService:
 
         company = filing.company
         budget_service = SummaryBudgetService(self.session)
-        if consume_override_budget and self.settings.openai_api_key and budget_service.remaining("override") <= 0:
+        if consume_override_budget and self.settings.openai_api_key and not budget_service.has_capacity("override"):
             raise RuntimeError("override_budget_exhausted")
 
         prior = self._prior_comparable_filing(company.id, filing)
@@ -834,9 +848,8 @@ class FilingService:
             prior_filing=prior,
             trigger="manual",
             summary_tier="full_ai",
+            budget_kind="override" if consume_override_budget else None,
         )
-        if consume_override_budget and self.settings.openai_api_key:
-            budget_service.record("override", 1)
         self.session.commit()
         return {"status": "summarized", "remaining_override_budget": self._remaining_override_budget()}
 
@@ -943,17 +956,37 @@ class FilingService:
         prior_filing: Filing | None,
         trigger: str,
         summary_tier: str,
+        budget_kind: str | None,
     ) -> None:
-        summary = self.summarizer.summarize(
-            kind="filing",
-            title=filing.title or f"{company.name} {filing.form_type}",
-            text=self._summary_source_text(filing, summary_tier=summary_tier),
-            company_name=company.name,
-            evidence_sections=list((filing.parsed_sections or {}).keys()),
-            form_type=filing.form_type,
-        )
+        summary_source_text = self._summary_source_text(filing, summary_tier=summary_tier)
+        model = self._model_for_summary(summary_tier=summary_tier, trigger=trigger)
+        prompt_cache_key = self._summary_prompt_cache_key(filing, summary_tier=summary_tier, model=model)
+        if hasattr(self.summarizer, "summarize_with_usage"):
+            result = self.summarizer.summarize_with_usage(
+                kind="filing",
+                title=filing.title or f"{company.name} {filing.form_type}",
+                text=summary_source_text,
+                company_name=company.name,
+                evidence_sections=list((filing.parsed_sections or {}).keys()),
+                form_type=filing.form_type,
+                model=model,
+                prompt_cache_key=prompt_cache_key,
+            )
+            summary = result.payload
+            usage = result.usage
+        else:
+            summary = self.summarizer.summarize(
+                kind="filing",
+                title=filing.title or f"{company.name} {filing.form_type}",
+                text=summary_source_text,
+                company_name=company.name,
+                evidence_sections=list((filing.parsed_sections or {}).keys()),
+                form_type=filing.form_type,
+            )
+            usage = UsageMetrics(model=model if self.settings.openai_api_key else "fallback-local")
+
         filing.summary_json = summary.model_dump()
-        filing.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
+        filing.summary_model = usage.model
         filing.summary_prompt_version = self.settings.summary_prompt_version
         filing.summary_status = "complete"
         filing.summary_tier = summary_tier
@@ -964,6 +997,11 @@ class FilingService:
             "summary_source_hash": hashlib.sha256(self._summary_source_text(filing, summary_tier="full_ai").encode("utf-8")).hexdigest(),
         }
         self._apply_scores(filing, company, prior_filing=prior_filing)
+        self._record_usage(
+            budget_kind,
+            self._summary_usage_kind(summary_tier),
+            usage,
+        )
 
         # Generate diff analysis for periodic filings with a prior comparable
         if (
@@ -973,17 +1011,44 @@ class FilingService:
             and self.settings.openai_api_key
         ):
             budget_service = SummaryBudgetService(self.session)
-            if budget_service.remaining("diff") > 0:
+            if budget_service.has_capacity("diff"):
                 try:
-                    diff_result = self.summarizer.summarize_diff(
-                        form_type=filing.form_type,
-                        company_name=company.name,
-                        current_text=self._summary_source_text(filing),
-                        prior_text=self._summary_source_text(prior_filing),
+                    diff_model = self.settings.openai_model_diff
+                    diff_prompt_cache_key = (
+                        f"diff:{filing.normalized_form_type or filing.form_type}:{self.settings.summary_prompt_version}:{diff_model}"
                     )
+                    if hasattr(self.summarizer, "summarize_diff_with_usage"):
+                        diff_call = self.summarizer.summarize_diff_with_usage(
+                            form_type=filing.form_type,
+                            company_name=company.name,
+                            current_text=self._summary_source_text(filing),
+                            prior_text=self._summary_source_text(prior_filing),
+                            model=diff_model,
+                            prompt_cache_key=diff_prompt_cache_key,
+                        )
+                        diff_result = diff_call.payload
+                        diff_usage = diff_call.usage
+                    else:
+                        diff_result = self.summarizer.summarize_diff(
+                            form_type=filing.form_type,
+                            company_name=company.name,
+                            current_text=self._summary_source_text(filing),
+                            prior_text=self._summary_source_text(prior_filing),
+                        )
+                        diff_usage = UsageMetrics(model=diff_model)
                     filing.diff_json = diff_result
                     filing.diff_status = "complete" if "summary" in diff_result else "failed"
-                    budget_service.record("diff", 1)
+                    if "summary" in diff_result:
+                        budget_service.record(
+                            "diff",
+                            1,
+                            prompt_tokens=diff_usage.prompt_tokens,
+                            completion_tokens=diff_usage.completion_tokens,
+                            reasoning_tokens=diff_usage.reasoning_tokens,
+                            cached_input_tokens=diff_usage.cached_input_tokens,
+                            estimated_cost_usd=diff_usage.estimated_cost_usd,
+                            model=diff_usage.model,
+                        )
                 except Exception:
                     filing.diff_status = "failed"
 
@@ -1304,3 +1369,91 @@ class FilingService:
         if not self.settings.openai_api_key:
             return 0
         return SummaryBudgetService(self.session).remaining("override")
+
+    def pending_queue_counts(self, *, include_historical: bool = False) -> dict[str, int]:
+        watchlist_ids = watchlist_company_ids(self.session)
+        cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
+        counts = {"filings_pending": 0, "filings_pending_full_ai": 0, "filings_pending_short_ai": 0}
+        rows = self.session.execute(
+            select(Filing, Company)
+            .join(Company, Filing.company_id == Company.id)
+            .where(Filing.summary_status.in_(["pending", "failed", "stale"]), Filing.summary_attempts < 3)
+        ).all()
+        for filing, company in rows:
+            ingest_origin = (filing.extra_metadata or {}).get("ingest_origin")
+            if not include_historical and ingest_origin != "sec_poll":
+                continue
+            filed_at = filing.filed_at if filing.filed_at.tzinfo else filing.filed_at.replace(tzinfo=UTC)
+            if filed_at < cutoff:
+                continue
+            counts["filings_pending"] += 1
+            tier = self._summary_tier_for_filing(
+                filing,
+                automated=True,
+                watchlist_match=company.id in watchlist_ids,
+            )
+            counts[f"filings_pending_{tier}"] += 1
+        return counts
+
+    def _resolve_summary_tier(
+        self,
+        budget_service: SummaryBudgetService,
+        *,
+        preferred_tier: str,
+        automated: bool,
+    ) -> str | None:
+        if not automated or not self.settings.openai_api_key:
+            return preferred_tier
+        if preferred_tier == "full_ai":
+            if budget_service.remaining("filing_full_ai") > 0:
+                return "full_ai"
+            if budget_service.remaining("filing_short_ai") > 0:
+                return "short_ai"
+            return None
+        if budget_service.remaining("filing_short_ai") > 0:
+            return "short_ai"
+        return None
+
+    @staticmethod
+    def _select_automated_budget_kind(
+        budget_service: SummaryBudgetService,
+        *,
+        primary_kind: str,
+        allow_override: bool,
+    ) -> str | None:
+        if budget_service.has_capacity(primary_kind):
+            return primary_kind
+        if allow_override and budget_service.has_capacity("override"):
+            return "override"
+        return None
+
+    def _model_for_summary(self, *, summary_tier: str, trigger: str) -> str:
+        if trigger == "manual":
+            return self.settings.openai_model_manual
+        if summary_tier == "short_ai":
+            return self.settings.openai_model_summary_short
+        return self.settings.openai_model_summary_full
+
+    @staticmethod
+    def _summary_usage_kind(summary_tier: str) -> str:
+        return "filing_short_ai" if summary_tier == "short_ai" else "filing_full_ai"
+
+    def _summary_prompt_cache_key(self, filing: Filing, *, summary_tier: str, model: str) -> str:
+        form_group = filing.normalized_form_type or filing.form_type or "filing"
+        return f"summary:filing:{summary_tier}:{form_group}:{self.settings.summary_prompt_version}:{model}"
+
+    def _record_usage(self, budget_kind: str | None, tier_kind: str, usage: UsageMetrics) -> None:
+        if not self.settings.openai_api_key or budget_kind is None:
+            return
+        budget_service = SummaryBudgetService(self.session)
+        budget_service.record(
+            budget_kind,
+            1,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            estimated_cost_usd=usage.estimated_cost_usd,
+            model=usage.model,
+        )
+        budget_service.record(tier_kind, 1)

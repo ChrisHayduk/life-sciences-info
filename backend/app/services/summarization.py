@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -112,7 +113,6 @@ SCORING GUIDANCE:
 - 0-29: Administrative filings, immaterial amendments
 """.strip()
 
-# Form-type-specific context appended to the user prompt
 FORM_TYPE_CONTEXT: dict[str, str] = {
     "10-K": (
         "This is an ANNUAL report (10-K). Focus on year-over-year changes in revenue, R&D spend, "
@@ -140,7 +140,6 @@ FORM_TYPE_CONTEXT: dict[str, str] = {
     ),
 }
 
-# Maximum text length sent to the LLM per form type
 TEXT_LIMITS: dict[str, int] = {
     "10-K": 30000,
     "20-F": 30000,
@@ -149,6 +148,41 @@ TEXT_LIMITS: dict[str, int] = {
     "8-K": 15000,
     "6-K": 15000,
 }
+
+MODEL_PRICING_PER_1M: dict[str, dict[str, float]] = {
+    "gpt-5.4": {"input": 2.50, "cached_input": 0.25, "output": 15.00},
+    "gpt-5.4-mini": {"input": 0.75, "cached_input": 0.075, "output": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "cached_input": 0.02, "output": 1.25},
+    "gpt-5-mini": {"input": 0.25, "cached_input": 0.025, "output": 2.00},
+}
+
+
+@dataclass
+class UsageMetrics:
+    model: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_input_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+
+
+@dataclass
+class SummaryCallResult:
+    payload: SummaryPayload
+    usage: UsageMetrics
+
+
+@dataclass
+class DiffCallResult:
+    payload: dict[str, Any]
+    usage: UsageMetrics
+
+
+@dataclass
+class DigestCallResult:
+    text: str
+    usage: UsageMetrics
 
 
 class OpenAISummarizer:
@@ -166,87 +200,62 @@ class OpenAISummarizer:
         evidence_sections: list[str] | None = None,
         form_type: str | None = None,
         max_attempts: int = 2,
+        model: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> SummaryPayload:
-        if not self.settings.openai_api_key:
-            return self._fallback_summary(kind=kind, title=title, text=text, company_name=company_name, evidence_sections=evidence_sections)
+        return self.summarize_with_usage(
+            kind=kind,
+            title=title,
+            text=text,
+            company_name=company_name,
+            evidence_sections=evidence_sections,
+            form_type=form_type,
+            max_attempts=max_attempts,
+            model=model,
+            prompt_cache_key=prompt_cache_key,
+        ).payload
 
-        last_error: Exception | None = None
-        for _ in range(max_attempts):
-            try:
-                payload = self._call_openai(
-                    kind=kind, title=title, text=text, company_name=company_name,
-                    evidence_sections=evidence_sections, form_type=form_type,
-                )
-                return SummaryPayload.model_validate(payload)
-            except (ValidationError, ValueError, httpx.HTTPError) as exc:
-                last_error = exc
-        raise RuntimeError(f"Unable to summarize after {max_attempts} attempts") from last_error
-
-    def _call_openai(
+    def summarize_with_usage(
         self,
         *,
         kind: str,
         title: str,
         text: str,
-        company_name: str | None,
-        evidence_sections: list[str] | None,
+        company_name: str | None = None,
+        evidence_sections: list[str] | None = None,
         form_type: str | None = None,
-    ) -> dict[str, Any]:
-        # Determine text limit based on form type
-        normalized_form = (form_type or "").split("/")[0].upper() if form_type else ""
-        text_limit = TEXT_LIMITS.get(normalized_form, 20000)
-        form_context = FORM_TYPE_CONTEXT.get(normalized_form, "")
+        max_attempts: int = 2,
+        model: str | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> SummaryCallResult:
+        selected_model = model or self.settings.openai_model
+        if not self.settings.openai_api_key:
+            payload = self._fallback_summary(
+                kind=kind,
+                title=title,
+                text=text,
+                company_name=company_name,
+                evidence_sections=evidence_sections,
+            )
+            return SummaryCallResult(payload=payload, usage=UsageMetrics(model="fallback-local"))
 
-        prompt_parts = [
-            f"Kind: {kind}",
-            f"Title: {title}",
-            f"Company: {company_name or 'N/A'}",
-        ]
-        if form_type:
-            prompt_parts.append(f"Form Type: {form_type}")
-        if form_context:
-            prompt_parts.append(f"\nForm-specific guidance:\n{form_context}")
-        prompt_parts.append(f"Evidence Sections: {', '.join(evidence_sections or []) or 'N/A'}")
-        prompt_parts.append(f"\nSource text:\n{text[:text_limit]}")
-        prompt = "\n".join(prompt_parts)
-        response = self.http_client.post(
-            f"{self.settings.openai_api_base}/responses",
-            headers={
-                "Authorization": f"Bearer {self.settings.openai_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": self.settings.openai_model,
-                "input": [
-                    {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-                    {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
-                ],
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "life_sciences_8k_summary" if normalized_form == "8-K" else "life_sciences_summary",
-                        "schema": EIGHT_K_SUMMARY_SCHEMA if normalized_form == "8-K" else SUMMARY_SCHEMA,
-                        "strict": True,
-                    }
-                },
-            },
-        )
-        response.raise_for_status()
-        body = response.json()
-        extracted = self._extract_json_payload(body)
-        return json.loads(extracted) if isinstance(extracted, str) else extracted
-
-    def _extract_json_payload(self, body: dict[str, Any]) -> str | dict[str, Any]:
-        if body.get("output_text"):
-            return body["output_text"]
-        for output in body.get("output", []):
-            for content in output.get("content", []):
-                if "json" in content:
-                    return content["json"]
-                text = content.get("text")
-                if text:
-                    return text
-        raise ValueError("Response did not contain structured output")
+        last_error: Exception | None = None
+        for _ in range(max_attempts):
+            try:
+                payload, usage = self._call_openai(
+                    kind=kind,
+                    title=title,
+                    text=text,
+                    company_name=company_name,
+                    evidence_sections=evidence_sections,
+                    form_type=form_type,
+                    model=selected_model,
+                    prompt_cache_key=prompt_cache_key,
+                )
+                return SummaryCallResult(payload=SummaryPayload.model_validate(payload), usage=usage)
+            except (ValidationError, ValueError, httpx.HTTPError) as exc:
+                last_error = exc
+        raise RuntimeError(f"Unable to summarize after {max_attempts} attempts") from last_error
 
     def summarize_diff(
         self,
@@ -256,10 +265,36 @@ class OpenAISummarizer:
         current_text: str,
         prior_text: str,
         max_attempts: int = 2,
-    ) -> dict:
-        """Compare two sequential filings and return structured diff analysis."""
+        model: str | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> dict[str, Any]:
+        return self.summarize_diff_with_usage(
+            form_type=form_type,
+            company_name=company_name,
+            current_text=current_text,
+            prior_text=prior_text,
+            max_attempts=max_attempts,
+            model=model,
+            prompt_cache_key=prompt_cache_key,
+        ).payload
+
+    def summarize_diff_with_usage(
+        self,
+        *,
+        form_type: str,
+        company_name: str,
+        current_text: str,
+        prior_text: str,
+        max_attempts: int = 2,
+        model: str | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> DiffCallResult:
+        selected_model = model or self.settings.openai_model
         if not self.settings.openai_api_key:
-            return {"status": "skipped", "reason": "No OpenAI API key configured"}
+            return DiffCallResult(
+                payload={"status": "skipped", "reason": "No OpenAI API key configured"},
+                usage=UsageMetrics(model="fallback-local"),
+            )
 
         diff_schema = {
             "type": "object",
@@ -288,39 +323,41 @@ class OpenAISummarizer:
             "- summary: 2-3 sentence overview of the most material changes"
         )
 
+        request_body = {
+            "model": selected_model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
+                {"role": "user", "content": [{"type": "input_text", "text": diff_prompt}]},
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "filing_diff_analysis",
+                    "schema": diff_schema,
+                    "strict": True,
+                }
+            },
+        }
+        if prompt_cache_key:
+            request_body["prompt_cache_key"] = prompt_cache_key
+
         last_error: Exception | None = None
         for _ in range(max_attempts):
             try:
-                response = self.http_client.post(
-                    f"{self.settings.openai_api_base}/responses",
-                    headers={
-                        "Authorization": f"Bearer {self.settings.openai_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.settings.openai_model,
-                        "input": [
-                            {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-                            {"role": "user", "content": [{"type": "input_text", "text": diff_prompt}]},
-                        ],
-                        "text": {
-                            "format": {
-                                "type": "json_schema",
-                                "name": "filing_diff_analysis",
-                                "schema": diff_schema,
-                                "strict": True,
-                            }
-                        },
-                    },
-                )
-                response.raise_for_status()
-                body = response.json()
+                body = self._post_responses(request_body)
                 extracted = self._extract_json_payload(body)
-                return json.loads(extracted) if isinstance(extracted, str) else extracted
+                payload = json.loads(extracted) if isinstance(extracted, str) else extracted
+                return DiffCallResult(
+                    payload=payload,
+                    usage=self._extract_usage_metrics(body, selected_model),
+                )
             except (ValueError, httpx.HTTPError) as exc:
                 last_error = exc
 
-        return {"status": "failed", "reason": str(last_error)}
+        return DiffCallResult(
+            payload={"status": "failed", "reason": str(last_error)},
+            usage=UsageMetrics(model=selected_model),
+        )
 
     def summarize_digest(
         self,
@@ -329,16 +366,35 @@ class OpenAISummarizer:
         filing_summaries: list[dict[str, str]],
         news_summaries: list[dict[str, str]],
         max_attempts: int = 2,
+        model: str | None = None,
+        prompt_cache_key: str | None = None,
     ) -> str:
-        """Generate an AI narrative for the weekly digest from pre-existing summaries.
+        return self.summarize_digest_with_usage(
+            window_label=window_label,
+            filing_summaries=filing_summaries,
+            news_summaries=news_summaries,
+            max_attempts=max_attempts,
+            model=model,
+            prompt_cache_key=prompt_cache_key,
+        ).text
 
-        Returns a multi-paragraph narrative string. Falls back to simple
-        concatenation if no API key is configured.
-        """
+    def summarize_digest_with_usage(
+        self,
+        *,
+        window_label: str,
+        filing_summaries: list[dict[str, str]],
+        news_summaries: list[dict[str, str]],
+        max_attempts: int = 2,
+        model: str | None = None,
+        prompt_cache_key: str | None = None,
+    ) -> DigestCallResult:
+        selected_model = model or self.settings.openai_model
         if not self.settings.openai_api_key:
-            return self._fallback_digest_narrative(filing_summaries, news_summaries)
+            return DigestCallResult(
+                text=self._fallback_digest_narrative(filing_summaries, news_summaries),
+                usage=UsageMetrics(model="fallback-local"),
+            )
 
-        # Build compact input from existing summaries (no raw text needed)
         filing_block = "\n".join(
             f"- [{f.get('form_type', 'Filing')}] {f.get('company', 'Unknown')}: {f.get('summary', '')}"
             for f in filing_summaries[:10]
@@ -347,57 +403,185 @@ class OpenAISummarizer:
             f"- [{n.get('source', 'News')}] {n.get('title', '')}: {n.get('summary', '')}"
             for n in news_summaries[:10]
         )
-
         digest_prompt = (
             f"Digest window: {window_label}\n\n"
-            f"TOP FILINGS THIS WEEK:\n{filing_block or 'None'}\n\n"
-            f"TOP NEWS THIS WEEK:\n{news_block or 'None'}\n\n"
-            "Write a 3-5 paragraph weekly intelligence digest for a life sciences investor. "
-            "Synthesize themes across filings and news — do not list items one-by-one. "
-            "Highlight: (1) the most material regulatory or clinical events, "
-            "(2) notable risk changes across the portfolio, "
-            "(3) market-moving disclosures or guidance changes, "
-            "(4) any emerging patterns or sector trends. "
-            "Be concise, specific, and opinionated about what matters most."
+            f"TOP FILINGS IN THIS WINDOW:\n{filing_block or 'None'}\n\n"
+            f"TOP NEWS IN THIS WINDOW:\n{news_block or 'None'}\n\n"
+            "Write a concise life sciences intelligence digest in markdown. "
+            "Synthesize themes across filings and news rather than listing items one-by-one. "
+            "Explain what changed, why it matters, and what the reader should open next."
         )
+
+        request_body = {
+            "model": selected_model,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "You write concise intelligence digests for life sciences investors. "
+                                "Use markdown. Focus on what changed, why it matters, and how the items connect."
+                            ),
+                        }
+                    ],
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": digest_prompt}]},
+            ],
+        }
+        if prompt_cache_key:
+            request_body["prompt_cache_key"] = prompt_cache_key
 
         last_error: Exception | None = None
         for _ in range(max_attempts):
             try:
-                response = self.http_client.post(
-                    f"{self.settings.openai_api_base}/responses",
-                    headers={
-                        "Authorization": f"Bearer {self.settings.openai_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": self.settings.openai_model,
-                        "input": [
-                            {"role": "system", "content": [{"type": "input_text", "text": (
-                                "You write weekly intelligence digests for life sciences investors. "
-                                "Your tone is direct, analytical, and concise. Use markdown formatting. "
-                                "Focus on what changed this week and why it matters for portfolio decisions."
-                            )}]},
-                            {"role": "user", "content": [{"type": "input_text", "text": digest_prompt}]},
-                        ],
-                    },
+                body = self._post_responses(request_body)
+                text = self._extract_plain_text(body)
+                return DigestCallResult(
+                    text=text,
+                    usage=self._extract_usage_metrics(body, selected_model),
                 )
-                response.raise_for_status()
-                body = response.json()
-                # Extract plain text (not JSON schema)
-                text = body.get("output_text")
-                if text:
-                    return text
-                for output in body.get("output", []):
-                    for content in output.get("content", []):
-                        if content.get("text"):
-                            return content["text"]
-                raise ValueError("No text in response")
             except (ValueError, httpx.HTTPError) as exc:
                 last_error = exc
 
-        # Fall back to simple narrative on failure
-        return self._fallback_digest_narrative(filing_summaries, news_summaries)
+        return DigestCallResult(
+            text=self._fallback_digest_narrative(filing_summaries, news_summaries),
+            usage=UsageMetrics(model=selected_model),
+        )
+
+    def _call_openai(
+        self,
+        *,
+        kind: str,
+        title: str,
+        text: str,
+        company_name: str | None,
+        evidence_sections: list[str] | None,
+        form_type: str | None = None,
+        model: str,
+        prompt_cache_key: str | None = None,
+    ) -> tuple[dict[str, Any], UsageMetrics]:
+        normalized_form = (form_type or "").split("/")[0].upper() if form_type else ""
+        text_limit = TEXT_LIMITS.get(normalized_form, 20000)
+        form_context = FORM_TYPE_CONTEXT.get(normalized_form, "")
+
+        prompt_parts = [
+            f"Kind: {kind}",
+            f"Title: {title}",
+            f"Company: {company_name or 'N/A'}",
+        ]
+        if form_type:
+            prompt_parts.append(f"Form Type: {form_type}")
+        if form_context:
+            prompt_parts.append(f"\nForm-specific guidance:\n{form_context}")
+        prompt_parts.append(f"Evidence Sections: {', '.join(evidence_sections or []) or 'N/A'}")
+        prompt_parts.append(f"\nSource text:\n{text[:text_limit]}")
+        prompt = "\n".join(prompt_parts)
+
+        request_body = {
+            "model": model,
+            "input": [
+                {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
+                {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+            ],
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "life_sciences_8k_summary" if normalized_form == "8-K" else "life_sciences_summary",
+                    "schema": EIGHT_K_SUMMARY_SCHEMA if normalized_form == "8-K" else SUMMARY_SCHEMA,
+                    "strict": True,
+                }
+            },
+        }
+        if prompt_cache_key:
+            request_body["prompt_cache_key"] = prompt_cache_key
+
+        body = self._post_responses(request_body)
+        extracted = self._extract_json_payload(body)
+        payload = json.loads(extracted) if isinstance(extracted, str) else extracted
+        return payload, self._extract_usage_metrics(body, model)
+
+    def _post_responses(self, request_body: dict[str, Any]) -> dict[str, Any]:
+        response = self.http_client.post(
+            f"{self.settings.openai_api_base}/responses",
+            headers={
+                "Authorization": f"Bearer {self.settings.openai_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _extract_json_payload(self, body: dict[str, Any]) -> str | dict[str, Any]:
+        if body.get("output_text"):
+            return body["output_text"]
+        for output in body.get("output", []):
+            for content in output.get("content", []):
+                if "json" in content:
+                    return content["json"]
+                text = content.get("text")
+                if text:
+                    return text
+        raise ValueError("Response did not contain structured output")
+
+    def _extract_plain_text(self, body: dict[str, Any]) -> str:
+        if body.get("output_text"):
+            return str(body["output_text"])
+        for output in body.get("output", []):
+            for content in output.get("content", []):
+                text = content.get("text")
+                if text:
+                    return str(text)
+        raise ValueError("No text in response")
+
+    def _extract_usage_metrics(self, body: dict[str, Any], requested_model: str) -> UsageMetrics:
+        model = str(body.get("model") or requested_model)
+        usage = body.get("usage") or {}
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        cached_tokens = int((usage.get("input_tokens_details") or {}).get("cached_tokens") or 0)
+        reasoning_tokens = int((usage.get("output_tokens_details") or {}).get("reasoning_tokens") or 0)
+        estimated_cost = self._estimate_cost_usd(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=cached_tokens,
+        )
+        return UsageMetrics(
+            model=model,
+            prompt_tokens=input_tokens,
+            completion_tokens=output_tokens,
+            reasoning_tokens=reasoning_tokens,
+            cached_input_tokens=cached_tokens,
+            estimated_cost_usd=estimated_cost,
+        )
+
+    def _estimate_cost_usd(
+        self,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        cached_input_tokens: int,
+    ) -> float:
+        pricing = MODEL_PRICING_PER_1M.get(self._canonical_model_name(model))
+        if not pricing:
+            return 0.0
+        uncached_input_tokens = max(input_tokens - cached_input_tokens, 0)
+        input_cost = uncached_input_tokens * pricing["input"] / 1_000_000
+        cached_input_cost = cached_input_tokens * pricing.get("cached_input", pricing["input"]) / 1_000_000
+        output_cost = output_tokens * pricing["output"] / 1_000_000
+        return round(input_cost + cached_input_cost + output_cost, 6)
+
+    @staticmethod
+    def _canonical_model_name(model: str) -> str:
+        normalized = (model or "").strip()
+        for candidate in MODEL_PRICING_PER_1M:
+            if normalized == candidate or normalized.startswith(f"{candidate}-"):
+                return candidate
+        return normalized
 
     @staticmethod
     def _fallback_digest_narrative(
@@ -406,7 +590,7 @@ class OpenAISummarizer:
     ) -> str:
         bits = []
         if filing_summaries:
-            bits.append(f"{len(filing_summaries)} notable filings were captured this week.")
+            bits.append(f"{len(filing_summaries)} notable filings were captured in this window.")
         if news_summaries:
             top_title = news_summaries[0].get("title", "")
             bits.append(f"{len(news_summaries)} important news items were tracked, led by {top_title}.")
@@ -435,7 +619,12 @@ class OpenAISummarizer:
             hits = [word for word in words if word in lower]
             return [f"{label}: {word}" for word in hits[:3]]
 
-        importance = min(100.0, 30.0 + 10.0 * sum(keyword in lower for keyword in ["approval", "guidance", "restructuring", "trial", "earnings", "revenue"]))
+        importance = min(
+            100.0,
+            30.0
+            + 10.0
+            * sum(keyword in lower for keyword in ["approval", "guidance", "restructuring", "trial", "earnings", "revenue"]),
+        )
         return SummaryPayload(
             summary=summary or title,
             key_takeaways=sentences[:3] or [title],
@@ -449,4 +638,3 @@ class OpenAISummarizer:
             composite_score=importance,
             score_explanation=f"Fallback summary used for {kind}; OpenAI credentials unavailable.",
         )
-

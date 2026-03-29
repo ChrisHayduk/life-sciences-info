@@ -20,3 +20,22 @@ def test_build_scheduler_includes_weekly_trial_poll(monkeypatch):
     scheduler = scheduler_module.build_scheduler(background=True)
     job_ids = {job.id for job in scheduler.get_jobs()}
     assert "poll_trials" in job_ids
+
+
+def test_build_scheduler_can_include_daily_digest(monkeypatch):
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            timezone="America/New_York",
+            digest_weekday="mon",
+            digest_hour=8,
+            digest_minute=0,
+            enable_daily_digest=True,
+            daily_digest_hour=7,
+        ),
+    )
+
+    scheduler = scheduler_module.build_scheduler(background=True)
+    job_ids = {job.id for job in scheduler.get_jobs()}
+    assert "build_daily_digest" in job_ids

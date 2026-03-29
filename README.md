@@ -277,6 +277,7 @@ python -m app.jobs ingest-news
 python -m app.jobs poll-regulatory-events
 python -m app.jobs poll-trials
 python -m app.jobs poll-trials --focus-tickers MRK,PFE
+python -m app.jobs build-daily-digest
 python -m app.jobs build-weekly-digest
 ```
 
@@ -345,7 +346,12 @@ Important operational note:
 - `ENABLE_SCHEDULER=true`
 - `ENABLE_BROWSER_PDF_RENDERING=true`
 - `OBJECT_STORE_REGION=auto` for Cloudflare R2
-- `OPENAI_MODEL=gpt-5-mini`
+- `OPENAI_MODEL=gpt-5.4-mini`
+- `OPENAI_MODEL_SUMMARY_SHORT=gpt-5.4-mini`
+- `OPENAI_MODEL_SUMMARY_FULL=gpt-5.4`
+- `OPENAI_MODEL_DIFF=gpt-5.4`
+- `OPENAI_MODEL_DIGEST=gpt-5.4`
+- `OPENAI_MODEL_MANUAL=gpt-5.4`
 - `CLINICAL_TRIALS_PROVIDER=aact_cloud`
 - `AACT_DB_HOST=aact-db.ctti-clinicaltrials.org`
 - `AACT_DB_PORT=5432`
@@ -353,11 +359,23 @@ Important operational note:
 
 ### Cost-control env vars
 
+- `DAILY_AI_BUDGET_USD`
+- `AI_BUDGET_NEWS_SHARE`
+- `AI_BUDGET_FILING_SHARE`
+- `AI_BUDGET_DIFF_SHARE`
+- `AI_BUDGET_OVERRIDE_SHARE`
+- `AI_BUDGET_DIGEST_SHARE`
 - `MAX_FILING_SUMMARIES_PER_DAY`
 - `MAX_NEWS_SUMMARIES_PER_DAY`
 - `MAX_OVERRIDE_SUMMARIES_PER_DAY`
 - `MAX_FILING_SUMMARIES_PER_RUN`
 - `MAX_NEWS_SUMMARIES_PER_RUN`
+- `MAX_FILING_FULL_AI_PER_DAY`
+- `MAX_FILING_SHORT_AI_PER_DAY`
+- `MAX_NEWS_FULL_AI_PER_DAY`
+- `MAX_NEWS_SHORT_AI_PER_DAY`
+- `MAX_FILING_DIFFS_PER_DAY`
+- `MAX_DIGEST_GENERATIONS_PER_DAY`
 - `FILING_SUMMARY_BACKLOG_DAYS`
 - `NEWS_SUMMARY_BACKLOG_DAYS`
 - `COMPANY_IR_TOP_COMPANY_LIMIT`
@@ -381,6 +399,8 @@ Important operational note:
 - `DIGEST_WEEKDAY`
 - `DIGEST_HOUR`
 - `DIGEST_MINUTE`
+- `ENABLE_DAILY_DIGEST`
+- `DAILY_DIGEST_HOUR`
 - `SEC_RATE_LIMIT_DELAY_SECONDS`
 - `SOURCE_FETCH_TIMEOUT_SECONDS`
 - `SUMMARY_PROMPT_VERSION`
@@ -421,6 +441,7 @@ Useful admin endpoints include:
 - `/api/v1/admin/poll-regulatory-events`
 - `/api/v1/admin/retag-news-companies`
 - `/api/v1/admin/summarize-pending/{kind}`
+- `/api/v1/admin/build-daily-digest`
 - `/api/v1/admin/build-weekly-digest`
 - `/api/v1/admin/poll-trials`
 - `/api/v1/admin/usage-stats`

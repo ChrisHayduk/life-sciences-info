@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.db import get_session
 from app.jobs import (
+    run_build_daily_digest,
     run_ingest_news,
     run_poll_regulatory_events,
     run_poll_sec_filings,
@@ -81,22 +82,37 @@ def require_admin_token(
 
 def _summary_budget_overview(session: Session) -> SummaryBudgetOverview:
     budget = SummaryBudgetService(session)
+    spend_by_model = {
+        model: payload
+        for model, payload in budget.spend_by_model_since(1).items()
+    }
+    recent_rows = budget.rows_since(7)
+    total_used_usd = (
+        budget.used_cost_today("filing")
+        + budget.used_cost_today("news")
+        + budget.used_cost_today("override")
+        + budget.used_cost_today("diff")
+        + budget.used_cost_today("digest")
+    )
+    total_limit_usd = (
+        budget.budget_usd_for_kind("filing")
+        + budget.budget_usd_for_kind("news")
+        + budget.budget_usd_for_kind("override")
+        + budget.budget_usd_for_kind("diff")
+        + budget.budget_usd_for_kind("digest")
+    )
+    total_cost_7d = sum(float(row.estimated_cost_usd or 0.0) for row in recent_rows)
     return SummaryBudgetOverview(
-        filing=SummaryBudgetSnapshot(
-            used=budget.used_today("filing"),
-            limit=budget.settings.max_filing_summaries_per_day,
-            remaining=budget.remaining("filing"),
-        ),
-        news=SummaryBudgetSnapshot(
-            used=budget.used_today("news"),
-            limit=budget.settings.max_news_summaries_per_day,
-            remaining=budget.remaining("news"),
-        ),
-        override=SummaryBudgetSnapshot(
-            used=budget.used_today("override"),
-            limit=budget.settings.max_override_summaries_per_day,
-            remaining=budget.remaining("override"),
-        ),
+        filing=SummaryBudgetSnapshot(**budget.snapshot("filing")),
+        news=SummaryBudgetSnapshot(**budget.snapshot("news")),
+        override=SummaryBudgetSnapshot(**budget.snapshot("override")),
+        diff=SummaryBudgetSnapshot(**budget.snapshot("diff")),
+        digest=SummaryBudgetSnapshot(**budget.snapshot("digest")),
+        total_used_usd=round(total_used_usd, 4),
+        total_limit_usd=round(total_limit_usd, 4),
+        total_remaining_usd=round(max(total_limit_usd - total_used_usd, 0.0), 4),
+        seven_day_average_usd=round(total_cost_7d / 7.0, 4),
+        spend_by_model=spend_by_model,
     )
 
 
@@ -114,6 +130,8 @@ def get_dashboard(session: Session = Depends(get_session)) -> DashboardResponse:
     latest_news = news_service.list_news(limit=5, recent_days=1, sort_mode="freshness")
     important_filings = filing_service.list_filings(limit=5, recent_days=90, sort_mode="importance")
     important_news = news_service.list_news(limit=5, recent_days=14, sort_mode="importance")
+    filing_queue_counts = filing_service.pending_queue_counts()
+    news_queue_counts = news_service.pending_queue_counts()
     return DashboardResponse(
         latest_filings=latest_filings,
         latest_news=latest_news,
@@ -138,14 +156,7 @@ def get_dashboard(session: Session = Depends(get_session)) -> DashboardResponse:
             "digests": session.scalar(select(func.count()).select_from(Digest)) or 0,
         },
         ai_budget=_summary_budget_overview(session),
-        queue_counts={
-            "filings_pending": session.scalar(
-                select(func.count()).select_from(Filing).where(Filing.summary_status.in_(["pending", "failed", "stale"]))
-            ) or 0,
-            "news_pending": session.scalar(
-                select(func.count()).select_from(NewsItem).where(NewsItem.summary_status.in_(["pending", "failed", "stale"]))
-            ) or 0,
-        },
+        queue_counts={**filing_queue_counts, **news_queue_counts},
     )
 
 
@@ -433,7 +444,8 @@ def admin_poll_filings(session: Session = Depends(get_session)) -> AdminActionRe
         status="ok",
         message=(
             f"Discovered {result['new_items']} new filings, summarized {result['summarized']}, "
-            f"{result['remaining_daily_budget']} filing summaries remain today."
+            f"{result['remaining_daily_budget']} filing summaries remain today "
+            f"(${result['remaining_daily_budget_usd']:.2f} filing budget left)."
         ),
     )
 
@@ -445,7 +457,8 @@ def admin_ingest_news(session: Session = Depends(get_session)) -> AdminActionRes
         status="ok",
         message=(
             f"Ingested {result['new_items']} news items, summarized {result['summarized']}, "
-            f"{result['remaining_daily_budget']} news summaries remain today."
+            f"{result['remaining_daily_budget']} news summaries remain today "
+            f"(${result['remaining_daily_budget_usd']:.2f} news budget left)."
         ),
     )
 
@@ -488,7 +501,8 @@ def admin_summarize_pending(kind: str, limit: int | None = None, include_histori
         status="ok",
         message=(
             f"Summarized {result['summarized']} pending {kind} items; "
-            f"{result['remaining_daily_budget']} daily budget remains."
+            f"{result['remaining_daily_budget']} daily budget remains "
+            f"(${result['remaining_daily_budget_usd']:.2f} left)."
         ),
     )
 
@@ -497,6 +511,12 @@ def admin_summarize_pending(kind: str, limit: int | None = None, include_histori
 def admin_build_digest(session: Session = Depends(get_session)) -> AdminActionResponse:
     digest = DigestService(session).build_weekly_digest()
     return AdminActionResponse(status="ok", message=f"Built digest {digest.id}.")
+
+
+@router.post("/admin/build-daily-digest", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_build_daily_digest() -> AdminActionResponse:
+    digest_id = run_build_daily_digest()
+    return AdminActionResponse(status="ok", message=f"Built daily digest {digest_id}.")
 
 
 @router.post("/admin/re-summarize/{kind}/{item_id}", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
@@ -624,13 +644,18 @@ def admin_usage_stats(days: int = 7, session: Session = Depends(get_session)):
             "count": row.count,
             "prompt_tokens": row.prompt_tokens,
             "completion_tokens": row.completion_tokens,
+            "reasoning_tokens": row.reasoning_tokens,
+            "cached_input_tokens": row.cached_input_tokens,
             "total_tokens": row.prompt_tokens + row.completion_tokens,
             "estimated_cost_usd": round(row.estimated_cost_usd, 4),
+            "model_breakdown": row.model_breakdown or {},
         })
 
     total_calls = sum(r.count for r in rows)
     total_tokens = sum(r.prompt_tokens + r.completion_tokens for r in rows)
     total_cost = sum(r.estimated_cost_usd for r in rows)
+    budget_service = SummaryBudgetService(session)
+    spend_by_model = budget_service.spend_by_model_since(days)
 
     return {
         "period_days": days,
@@ -640,4 +665,9 @@ def admin_usage_stats(days: int = 7, session: Session = Depends(get_session)):
             "tokens": total_tokens,
             "estimated_cost_usd": round(total_cost, 4),
         },
+        "budget": {
+            "today": _summary_budget_overview(session).model_dump(),
+            "rolling_average_usd": round(total_cost / max(days, 1), 4),
+        },
+        "by_model": spend_by_model,
     }

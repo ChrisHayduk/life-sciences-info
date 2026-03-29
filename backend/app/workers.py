@@ -6,6 +6,7 @@ from dramatiq.brokers.redis import RedisBroker
 from app.config import get_settings
 from app.jobs import (
     run_backfill_company,
+    run_build_daily_digest,
     run_build_weekly_digest,
     run_ingest_news,
     run_poll_regulatory_events,
@@ -65,6 +66,11 @@ def summarize_pending(kind: str, limit: int | None = None) -> dict[str, int]:
 @dramatiq.actor
 def build_weekly_digest() -> int:
     return run_build_weekly_digest()
+
+
+@dramatiq.actor
+def build_daily_digest() -> int:
+    return run_build_daily_digest()
 
 
 @dramatiq.actor

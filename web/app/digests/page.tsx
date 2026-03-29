@@ -14,16 +14,16 @@ export default async function DigestsPage() {
         <span className="text-xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
           Digest Archive
         </span>
-        <h2 className="text-2xl mt-1">Weekly review of filings and news</h2>
+        <h2 className="text-2xl mt-1">Daily and weekly reviews of filings and news</h2>
         <p className="text-sm text-muted-foreground mt-2 leading-relaxed">
-          The digest captures the prior Monday through Sunday window and highlights the highest ranked items.
+          Daily briefings recap already-summarized items from the prior day, while weekly digests synthesize the prior Monday through Sunday window.
         </p>
       </section>
 
       <section>
         <SectionHeader
           eyebrow="Archive"
-          title={`${digests.length} weekly digests`}
+          title={`${digests.length} saved digests`}
           description="Use this page for a compact recap before diving into individual filings or articles."
         />
         <div className="grid gap-4 md:grid-cols-2">
@@ -111,7 +111,7 @@ export default async function DigestsPage() {
           ) : (
             <EmptyPanel
               title="No digests yet"
-              body="Build a weekly digest after loading filings or news to populate this archive."
+              body="Build a daily or weekly digest after loading filings or news to populate this archive."
             />
           )}
         </div>

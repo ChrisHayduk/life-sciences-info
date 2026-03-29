@@ -126,6 +126,7 @@ def run_poll_sec_filings() -> dict[str, int]:
             "new_items": new_filings,
             "summarized": int(summary_result["summarized"]),
             "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
+            "remaining_daily_budget_usd": float(summary_result.get("remaining_daily_budget_usd") or 0.0),
         }
 
     return _with_session(_run)
@@ -140,6 +141,7 @@ def run_ingest_news() -> dict[str, int]:
             "new_items": new_items,
             "summarized": int(summary_result["summarized"]),
             "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
+            "remaining_daily_budget_usd": float(summary_result.get("remaining_daily_budget_usd") or 0.0),
         }
 
     return _with_session(_run)
@@ -204,6 +206,11 @@ def run_build_weekly_digest() -> int:
     return digest.id
 
 
+def run_build_daily_digest() -> int:
+    digest = _with_session(lambda session: DigestService(session).build_daily_digest())
+    return digest.id
+
+
 def run_summarize_pending(
     kind: str,
     *,
@@ -226,6 +233,7 @@ def run_summarize_pending(
     return {
         "summarized": int(result["summarized"]),
         "remaining_daily_budget": int(result["remaining_daily_budget"]),
+        "remaining_daily_budget_usd": float(result.get("remaining_daily_budget_usd") or 0.0),
     }
 
 
@@ -340,7 +348,8 @@ def run_refresh_all_data(
         print(
             f"News ingestion complete: {news_count} items, "
             f"{news_result['summarized']} summarized, "
-            f"{news_result['remaining_daily_budget']} daily budget remaining",
+            f"{news_result['remaining_daily_budget']} daily budget remaining "
+            f"(${news_result['remaining_daily_budget_usd']:.2f})",
             flush=True,
         )
 
@@ -435,6 +444,7 @@ def main() -> None:
         help="Comma-separated tickers to constrain the retagging pass, e.g. MRK,PFE,AMGN",
     )
     subparsers.add_parser("build-weekly-digest", help="Build the current weekly digest.")
+    subparsers.add_parser("build-daily-digest", help="Build the most recent daily digest.")
 
     summarize_pending_parser = subparsers.add_parser(
         "summarize-pending",
@@ -527,7 +537,8 @@ def main() -> None:
         print(
             f"Discovered {result['new_items']} new filings, "
             f"summarized {result['summarized']}, "
-            f"{result['remaining_daily_budget']} daily budget remaining",
+            f"{result['remaining_daily_budget']} daily budget remaining "
+            f"(${result['remaining_daily_budget_usd']:.2f})",
             flush=True,
         )
         return
@@ -536,7 +547,8 @@ def main() -> None:
         print(
             f"Ingested {result['new_items']} news items, "
             f"summarized {result['summarized']}, "
-            f"{result['remaining_daily_budget']} daily budget remaining",
+            f"{result['remaining_daily_budget']} daily budget remaining "
+            f"(${result['remaining_daily_budget_usd']:.2f})",
             flush=True,
         )
         return
@@ -588,13 +600,18 @@ def main() -> None:
         )
         print(
             f"Summarized {result['summarized']} pending {args.kind} items; "
-            f"{result['remaining_daily_budget']} daily budget remaining",
+            f"{result['remaining_daily_budget']} daily budget remaining "
+            f"(${result['remaining_daily_budget_usd']:.2f})",
             flush=True,
         )
         return
     if args.command == "build-weekly-digest":
         digest_id = run_build_weekly_digest()
         print(f"Built digest {digest_id}", flush=True)
+        return
+    if args.command == "build-daily-digest":
+        digest_id = run_build_daily_digest()
+        print(f"Built daily digest {digest_id}", flush=True)
         return
     if args.command == "reprocess-filing":
         item_id = run_reprocess_filing(args.item_id)

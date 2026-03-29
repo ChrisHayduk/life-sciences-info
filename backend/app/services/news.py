@@ -29,7 +29,7 @@ from app.services.ranking import (
     personal_relevance_score,
 )
 from app.services.summary_budget import SummaryBudgetService
-from app.services.summarization import OpenAISummarizer
+from app.services.summarization import OpenAISummarizer, UsageMetrics
 
 COMPANY_TAG_LIMIT = 10
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
@@ -235,30 +235,37 @@ class NewsService:
             return {"status": "already_complete", "remaining_override_budget": self._remaining_override_budget()}
 
         budget_service = SummaryBudgetService(self.session)
-        if consume_override_budget and self.settings.openai_api_key and budget_service.remaining("override") <= 0:
+        if consume_override_budget and self.settings.openai_api_key and not budget_service.has_capacity("override"):
             raise RuntimeError("override_budget_exhausted")
 
         companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-        self._apply_summary(news_item, trigger="manual", summary_tier="full_ai")
+        self._apply_summary(
+            news_item,
+            trigger="manual",
+            summary_tier="full_ai",
+            budget_kind="override" if consume_override_budget else None,
+        )
         self._apply_scores(news_item, companies)
-
-        if consume_override_budget and self.settings.openai_api_key:
-            budget_service.record("override", 1)
 
         self.session.commit()
         return {"status": "summarized", "remaining_override_budget": self._remaining_override_budget()}
 
     def summarize_pending(self, *, limit: int | None = None, automated: bool = True) -> dict[str, int]:
         budget_service = SummaryBudgetService(self.session)
-        remaining_daily = budget_service.remaining("news") if automated and self.settings.openai_api_key else max(limit or 0, self.settings.max_news_summaries_per_run)
+        remaining_daily = (
+            budget_service.remaining("news")
+            if automated and self.settings.openai_api_key
+            else max(limit or 0, self.settings.max_news_summaries_per_run)
+        )
         remaining_override = budget_service.remaining("override") if automated and self.settings.openai_api_key else 0
-        if automated and self.settings.openai_api_key:
-            effective_limit = min(limit or self.settings.max_news_summaries_per_run, self.settings.max_news_summaries_per_run, remaining_daily + remaining_override)
-        else:
-            effective_limit = limit or self.settings.max_news_summaries_per_run
+        effective_limit = limit or self.settings.max_news_summaries_per_run
 
         if effective_limit <= 0:
-            return {"summarized": 0, "remaining_daily_budget": remaining_daily}
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": remaining_daily,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("news"), 4) if self.settings.openai_api_key else 0.0,
+            }
 
         companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
         market_caps = company_market_cap_percentiles(self.session)
@@ -278,7 +285,6 @@ class NewsService:
         )
 
         summarized = 0
-        override_used = 0
         for news_item in candidates:
             published_at = news_item.published_at
             if published_at.tzinfo is None:
@@ -287,36 +293,50 @@ class NewsService:
                 continue
             is_override = self._qualifies_for_priority_override(news_item, watchlist_company_ids)
             if automated and self.settings.openai_api_key:
-                if remaining_daily <= 0 and (not is_override or remaining_override <= 0):
+                budget_kind = self._select_automated_budget_kind(
+                    budget_service,
+                    primary_kind="news",
+                    allow_override=is_override,
+                )
+                if budget_kind is None:
                     continue
+            else:
+                budget_kind = "news"
             try:
-                summary_tier = self._summary_tier_for_news_item(
+                preferred_tier = self._summary_tier_for_news_item(
                     news_item,
                     automated=automated,
                     watchlist_company_ids=watchlist_company_ids,
                 )
-                self._apply_summary(news_item, trigger="auto" if automated else "manual", summary_tier=summary_tier)
+                summary_tier = self._resolve_summary_tier(
+                    budget_service,
+                    preferred_tier=preferred_tier,
+                    automated=automated,
+                )
+                if summary_tier is None:
+                    continue
+                self._apply_summary(
+                    news_item,
+                    trigger="auto" if automated else "manual",
+                    summary_tier=summary_tier,
+                    budget_kind=budget_kind,
+                )
                 self._apply_scores(news_item, companies)
             except Exception:
                 news_item.summary_status = "failed"
                 news_item.summary_attempts += 1
                 continue
             summarized += 1
-            if automated and self.settings.openai_api_key:
-                if remaining_daily > 0:
-                    remaining_daily -= 1
-                elif is_override and remaining_override > 0:
-                    remaining_override -= 1
-                    override_used += 1
             if summarized >= effective_limit:
                 break
 
-        if automated and self.settings.openai_api_key:
-            budget_service.record("news", summarized - override_used)
-            budget_service.record("override", override_used)
         self.session.commit()
         remaining = budget_service.remaining("news") if self.settings.openai_api_key else 0
-        return {"summarized": summarized, "remaining_daily_budget": remaining}
+        return {
+            "summarized": summarized,
+            "remaining_daily_budget": remaining,
+            "remaining_daily_budget_usd": round(budget_service.remaining_usd("news"), 4) if self.settings.openai_api_key else 0.0,
+        }
 
     def list_news(
         self,
@@ -496,23 +516,41 @@ class NewsService:
             key_takeaways=summary.get("key_takeaways", []),
         )
 
-    def _apply_summary(self, news_item: NewsItem, *, trigger: str, summary_tier: str) -> None:
+    def _apply_summary(self, news_item: NewsItem, *, trigger: str, summary_tier: str, budget_kind: str | None) -> None:
         text_limit = 4000 if summary_tier == "short_ai" else 12000
         source_text = (news_item.content_text or news_item.excerpt or news_item.title)[:text_limit]
-        summary = self.summarizer.summarize(
-            kind="news",
-            title=news_item.title,
-            text=source_text,
-            company_name=", ".join(news_item.mentioned_companies) if news_item.mentioned_companies else None,
-            evidence_sections=news_item.topic_tags or [],
-        )
+        model = self._model_for_summary(summary_tier=summary_tier, trigger=trigger)
+        prompt_cache_key = self._summary_prompt_cache_key(news_item, summary_tier=summary_tier, model=model)
+        if hasattr(self.summarizer, "summarize_with_usage"):
+            result = self.summarizer.summarize_with_usage(
+                kind="news",
+                title=news_item.title,
+                text=source_text,
+                company_name=", ".join(news_item.mentioned_companies) if news_item.mentioned_companies else None,
+                evidence_sections=news_item.topic_tags or [],
+                model=model,
+                prompt_cache_key=prompt_cache_key,
+            )
+            summary = result.payload
+            usage = result.usage
+        else:
+            summary = self.summarizer.summarize(
+                kind="news",
+                title=news_item.title,
+                text=source_text,
+                company_name=", ".join(news_item.mentioned_companies) if news_item.mentioned_companies else None,
+                evidence_sections=news_item.topic_tags or [],
+            )
+            usage = UsageMetrics(model=model if self.settings.openai_api_key else "fallback-local")
+
         news_item.summary_json = summary.model_dump()
-        news_item.summary_model = self.settings.openai_model if self.settings.openai_api_key else "fallback-local"
+        news_item.summary_model = usage.model
         news_item.summary_prompt_version = self.settings.summary_prompt_version
         news_item.summary_status = "complete"
         news_item.summary_tier = summary_tier
         news_item.summary_attempts += 1
         news_item.extra_metadata = {**(news_item.extra_metadata or {}), "summary_trigger": trigger}
+        self._record_usage(budget_kind, self._summary_usage_kind(summary_tier), usage)
 
     def _apply_scores(
         self,
@@ -843,6 +881,27 @@ class NewsService:
             return 0
         return SummaryBudgetService(self.session).remaining("override")
 
+    def pending_queue_counts(self) -> dict[str, int]:
+        watchlist_company_ids = _watchlist_company_ids(self.session)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.settings.news_summary_backlog_days)
+        counts = {"news_pending": 0, "news_pending_full_ai": 0, "news_pending_short_ai": 0}
+        items = self.session.scalars(
+            select(NewsItem)
+            .where(NewsItem.summary_status.in_(["pending", "failed", "stale"]), NewsItem.summary_attempts < 3)
+        ).all()
+        for news_item in items:
+            published_at = news_item.published_at if news_item.published_at.tzinfo else news_item.published_at.replace(tzinfo=timezone.utc)
+            if published_at < cutoff:
+                continue
+            counts["news_pending"] += 1
+            tier = self._summary_tier_for_news_item(
+                news_item,
+                automated=True,
+                watchlist_company_ids=watchlist_company_ids,
+            )
+            counts[f"news_pending_{tier}"] += 1
+        return counts
+
     def _summary_tier_for_news_item(
         self,
         news_item: NewsItem,
@@ -865,6 +924,69 @@ class NewsService:
             or news_item.event_type in {"approval", "regulatory", "earnings", "acquisition", "leadership-change"}
             or set(news_item.company_tag_ids or []).intersection(watchlist_company_ids)
         )
+
+    def _resolve_summary_tier(
+        self,
+        budget_service: SummaryBudgetService,
+        *,
+        preferred_tier: str,
+        automated: bool,
+    ) -> str | None:
+        if not automated or not self.settings.openai_api_key:
+            return preferred_tier
+        if preferred_tier == "full_ai":
+            if budget_service.remaining("news_full_ai") > 0:
+                return "full_ai"
+            if budget_service.remaining("news_short_ai") > 0:
+                return "short_ai"
+            return None
+        if budget_service.remaining("news_short_ai") > 0:
+            return "short_ai"
+        return None
+
+    @staticmethod
+    def _select_automated_budget_kind(
+        budget_service: SummaryBudgetService,
+        *,
+        primary_kind: str,
+        allow_override: bool,
+    ) -> str | None:
+        if budget_service.has_capacity(primary_kind):
+            return primary_kind
+        if allow_override and budget_service.has_capacity("override"):
+            return "override"
+        return None
+
+    def _model_for_summary(self, *, summary_tier: str, trigger: str) -> str:
+        if trigger == "manual":
+            return self.settings.openai_model_manual
+        if summary_tier == "short_ai":
+            return self.settings.openai_model_summary_short
+        return self.settings.openai_model_summary_full
+
+    @staticmethod
+    def _summary_usage_kind(summary_tier: str) -> str:
+        return "news_short_ai" if summary_tier == "short_ai" else "news_full_ai"
+
+    def _summary_prompt_cache_key(self, news_item: NewsItem, *, summary_tier: str, model: str) -> str:
+        event_group = news_item.event_type or "general"
+        return f"summary:news:{summary_tier}:{event_group}:{self.settings.summary_prompt_version}:{model}"
+
+    def _record_usage(self, budget_kind: str | None, tier_kind: str, usage: UsageMetrics) -> None:
+        if not self.settings.openai_api_key or budget_kind is None:
+            return
+        budget_service = SummaryBudgetService(self.session)
+        budget_service.record(
+            budget_kind,
+            1,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            estimated_cost_usd=usage.estimated_cost_usd,
+            model=usage.model,
+        )
+        budget_service.record(tier_kind, 1)
 
     def _representative_news_items(self, items: list[NewsItem], *, sort_mode: str) -> list[NewsItem]:
         groups: dict[str, list[NewsItem]] = {}

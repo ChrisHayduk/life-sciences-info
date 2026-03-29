@@ -40,12 +40,31 @@ class SummaryBudgetSnapshot(BaseModel):
     used: int = 0
     limit: int = 0
     remaining: int = 0
+    used_usd: float = 0.0
+    limit_usd: float = 0.0
+    remaining_usd: float = 0.0
+
+
+class ModelUsageSnapshot(BaseModel):
+    count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    cached_input_tokens: int = 0
+    estimated_cost_usd: float = 0.0
 
 
 class SummaryBudgetOverview(BaseModel):
     filing: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
     news: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
     override: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
+    diff: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
+    digest: SummaryBudgetSnapshot = Field(default_factory=SummaryBudgetSnapshot)
+    total_used_usd: float = 0.0
+    total_limit_usd: float = 0.0
+    total_remaining_usd: float = 0.0
+    seven_day_average_usd: float = 0.0
+    spend_by_model: dict[str, ModelUsageSnapshot] = Field(default_factory=dict)
 
 
 class CompanyResponse(BaseModel):

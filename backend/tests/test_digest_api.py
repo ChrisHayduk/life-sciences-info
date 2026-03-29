@@ -143,3 +143,57 @@ def test_dashboard_prefers_recent_filings_and_news(client, db_session, company):
     assert response.status_code == 200
     assert [item["id"] for item in payload["top_filings"]] == [recent_filing.id]
     assert [item["id"] for item in payload["top_news"]] == [recent_news.id]
+
+
+def test_daily_digest_reuses_existing_window(db_session, company):
+    now = datetime(2026, 3, 31, 12, 0, tzinfo=timezone.utc)
+    filing = Filing(
+        company_id=company.id,
+        accession_number="daily-1",
+        form_type="8-K",
+        normalized_form_type="8-K",
+        title="Apex Bio partnership update",
+        filed_at=now - timedelta(hours=20),
+        filing_url="https://example.com/daily-index",
+        original_document_url="https://example.com/daily-doc",
+        summary_json={"summary": "Partnership expanded", "importance_score": 80},
+        summary_status="complete",
+        summary_tier="full_ai",
+        importance_score=80,
+        market_cap_score=90,
+        impact_score=84,
+        composite_score=86,
+        score_explanation={"components": {"recency": 100}, "confidence": "high"},
+    )
+    news = NewsItem(
+        source_name="FDA Press Releases",
+        source_weight=1.0,
+        feed_url="https://example.com/rss",
+        title="Apex Bio receives FDA milestone",
+        canonical_url="https://example.com/daily-story",
+        excerpt="FDA milestone",
+        content_text="FDA milestone",
+        published_at=now - timedelta(hours=18),
+        article_hash="daily-news",
+        mentioned_companies=["Apex Bio"],
+        company_tag_ids=[company.id],
+        topic_tags=["regulatory"],
+        summary_json={"summary": "Regulatory milestone", "importance_score": 84},
+        summary_status="complete",
+        summary_tier="full_ai",
+        importance_score=84,
+        market_cap_score=90,
+        composite_score=88,
+        score_explanation={"components": {"recency": 100}, "confidence": "high"},
+    )
+    db_session.add_all([filing, news])
+    db_session.commit()
+
+    digest_service = DigestService(db_session)
+    digest = digest_service.build_daily_digest(reference=now)
+    digest_repeat = digest_service.build_daily_digest(reference=now)
+
+    assert digest.digest_type == "daily"
+    assert digest_repeat.id == digest.id
+    assert digest.payload["filings"][0]["id"] == filing.id
+    assert digest.payload["news"][0]["id"] == news.id

@@ -174,12 +174,31 @@ export type SummaryBudgetSnapshot = {
   used: number;
   limit: number;
   remaining: number;
+  used_usd: number;
+  limit_usd: number;
+  remaining_usd: number;
+};
+
+export type ModelUsageSnapshot = {
+  count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  reasoning_tokens: number;
+  cached_input_tokens: number;
+  estimated_cost_usd: number;
 };
 
 export type SummaryBudgetOverview = {
   filing: SummaryBudgetSnapshot;
   news: SummaryBudgetSnapshot;
   override: SummaryBudgetSnapshot;
+  diff: SummaryBudgetSnapshot;
+  digest: SummaryBudgetSnapshot;
+  total_used_usd: number;
+  total_limit_usd: number;
+  total_remaining_usd: number;
+  seven_day_average_usd: number;
+  spend_by_model: Record<string, ModelUsageSnapshot>;
 };
 
 export type Digest = {

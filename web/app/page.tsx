@@ -15,6 +15,9 @@ import { api } from "@/lib/api";
 
 export default async function DashboardPage() {
   const data = await api.dashboard().catch(() => null);
+  const modelSpend = Object.entries(data?.ai_budget.spend_by_model ?? {})
+    .sort((a, b) => b[1].estimated_cost_usd - a[1].estimated_cost_usd)
+    .slice(0, 2);
 
   if (!data) {
     return (
@@ -53,12 +56,24 @@ export default async function DashboardPage() {
                 {data.queue_counts.news_pending ?? 0} news summaries queued
               </Badge>
               <Badge variant="outline" className="text-xs font-normal">
-                Filing AI budget: {data.ai_budget.filing.used}/{data.ai_budget.filing.limit}
+                Filing queue: {data.queue_counts.filings_pending_full_ai ?? 0} full AI / {data.queue_counts.filings_pending_short_ai ?? 0} short AI
               </Badge>
               <Badge variant="outline" className="text-xs font-normal">
-                News AI budget: {data.ai_budget.news.used}/{data.ai_budget.news.limit}
+                News queue: {data.queue_counts.news_pending_full_ai ?? 0} full AI / {data.queue_counts.news_pending_short_ai ?? 0} short AI
+              </Badge>
+              <Badge variant="outline" className="text-xs font-normal">
+                AI spend today: ${data.ai_budget.total_used_usd.toFixed(2)} / ${data.ai_budget.total_limit_usd.toFixed(2)}
               </Badge>
             </div>
+            {modelSpend.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {modelSpend.map(([model, usage]) => (
+                  <Badge key={model} variant="secondary" className="text-xs font-normal">
+                    {model}: ${usage.estimated_cost_usd.toFixed(2)}
+                  </Badge>
+                ))}
+              </div>
+            ) : null}
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-2">
             <StatCard label="Companies" value={data.counts.companies ?? 0} />
@@ -66,7 +81,7 @@ export default async function DashboardPage() {
             <StatCard label="News" value={data.counts.news_items ?? 0} />
             <StatCard label="Trials" value={data.counts.clinical_trials ?? 0} />
             <StatCard label="Digests" value={data.counts.digests ?? 0} />
-            <StatCard label="Override Slots" value={data.ai_budget.override.remaining} />
+            <StatCard label="AI Budget Left" value={`$${data.ai_budget.total_remaining_usd.toFixed(2)}`} />
           </div>
         </div>
       </section>
@@ -204,12 +219,17 @@ export default async function DashboardPage() {
 
       <section className="rounded-2xl border border-border/50 bg-card p-7 shadow-lg">
         <SectionHeader
-          eyebrow="Weekly Digest"
-          title={data.latest_digest?.title ?? "Weekly digest pending"}
-          description="The digest stays weekly to control AI spend and synthesize only the highest-signal developments."
+          eyebrow="Latest Digest"
+          title={data.latest_digest?.title ?? "Digest pending"}
+          description="Daily briefings are built from already-summarized items, while weekly digests stay focused on the highest-signal developments."
         />
         {data.latest_digest?.narrative_summary ? (
-          <Markdown>{data.latest_digest.narrative_summary}</Markdown>
+          <>
+            <Badge variant="secondary" className="mb-3 text-xs">
+              {data.latest_digest.digest_type}
+            </Badge>
+            <Markdown>{data.latest_digest.narrative_summary}</Markdown>
+          </>
         ) : (
           <p className="text-sm leading-relaxed">
             The first digest will appear after filings or news are ingested and summarized.

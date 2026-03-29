@@ -147,11 +147,21 @@ Typical values:
 
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
+- `OPENAI_MODEL_SUMMARY_SHORT`
+- `OPENAI_MODEL_SUMMARY_FULL`
+- `OPENAI_MODEL_DIFF`
+- `OPENAI_MODEL_DIGEST`
+- `OPENAI_MODEL_MANUAL`
 - `OPENAI_API_BASE`
 
 Recommended defaults:
 
-- `OPENAI_MODEL=gpt-5-mini`
+- `OPENAI_MODEL=gpt-5.4-mini`
+- `OPENAI_MODEL_SUMMARY_SHORT=gpt-5.4-mini`
+- `OPENAI_MODEL_SUMMARY_FULL=gpt-5.4`
+- `OPENAI_MODEL_DIFF=gpt-5.4`
+- `OPENAI_MODEL_DIGEST=gpt-5.4`
+- `OPENAI_MODEL_MANUAL=gpt-5.4`
 - `OPENAI_API_BASE=https://api.openai.com/v1`
 
 #### Market data
@@ -221,14 +231,26 @@ Recommended R2 default:
 
 #### AI budget and prioritization
 
-- `MAX_FILING_SUMMARIES_PER_DAY=3`
-- `MAX_NEWS_SUMMARIES_PER_DAY=7`
-- `MAX_OVERRIDE_SUMMARIES_PER_DAY=2`
-- `MAX_FILING_SUMMARIES_PER_RUN=2`
-- `MAX_NEWS_SUMMARIES_PER_RUN=4`
-- `FILING_SUMMARY_BACKLOG_DAYS=14`
-- `NEWS_SUMMARY_BACKLOG_DAYS=3`
-- `COMPANY_IR_TOP_COMPANY_LIMIT=25`
+- `DAILY_AI_BUDGET_USD=1.00`
+- `AI_BUDGET_NEWS_SHARE=0.45`
+- `AI_BUDGET_FILING_SHARE=0.25`
+- `AI_BUDGET_DIFF_SHARE=0.10`
+- `AI_BUDGET_OVERRIDE_SHARE=0.10`
+- `AI_BUDGET_DIGEST_SHARE=0.10`
+- `MAX_FILING_SUMMARIES_PER_DAY=16`
+- `MAX_NEWS_SUMMARIES_PER_DAY=38`
+- `MAX_OVERRIDE_SUMMARIES_PER_DAY=8`
+- `MAX_FILING_SUMMARIES_PER_RUN=3`
+- `MAX_NEWS_SUMMARIES_PER_RUN=8`
+- `MAX_FILING_FULL_AI_PER_DAY=4`
+- `MAX_FILING_SHORT_AI_PER_DAY=12`
+- `MAX_NEWS_FULL_AI_PER_DAY=8`
+- `MAX_NEWS_SHORT_AI_PER_DAY=30`
+- `MAX_FILING_DIFFS_PER_DAY=8`
+- `MAX_DIGEST_GENERATIONS_PER_DAY=2`
+- `FILING_SUMMARY_BACKLOG_DAYS=21`
+- `NEWS_SUMMARY_BACKLOG_DAYS=5`
+- `COMPANY_IR_TOP_COMPANY_LIMIT=50`
 - `CATALYST_LOOKAHEAD_DAYS=180`
 - `RECENT_CATALYST_DAYS=90`
 
@@ -238,6 +260,8 @@ Recommended R2 default:
 - `DIGEST_WEEKDAY=mon`
 - `DIGEST_HOUR=8`
 - `DIGEST_MINUTE=0`
+- `ENABLE_DAILY_DIGEST=true`
+- `DAILY_DIGEST_HOUR=7`
 - `SEC_RATE_LIMIT_DELAY_SECONDS=0.2`
 - `SOURCE_FETCH_TIMEOUT_SECONDS=30`
 - `SUMMARY_PROMPT_VERSION=2026-03-28.v2`
@@ -345,6 +369,7 @@ When `ENABLE_SCHEDULER=true`, the Render API service automatically runs:
 - `poll-trials` every 7 days
 - `sync-universe` every 7 days
 - `refresh-market-caps` every 7 days
+- `build-daily-digest` on weekdays at `DAILY_DIGEST_HOUR` when `ENABLE_DAILY_DIGEST=true`
 - `build-weekly-digest` on the configured weekday/time
 
 Two important notes:
@@ -459,9 +484,10 @@ python -m app.jobs summarize-pending news --limit 10
 
 This is the manual escape hatch when you want to spend a little AI budget on the pending queue after a historical backfill.
 
-### Weekly digest
+### Daily and weekly digests
 
 ```bash
+python -m app.jobs build-daily-digest
 python -m app.jobs build-weekly-digest
 ```
 

@@ -7,6 +7,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.jobs import (
+    run_build_daily_digest,
     run_build_weekly_digest,
     run_ingest_news,
     run_poll_regulatory_events,
@@ -45,6 +46,13 @@ def build_scheduler(background: bool = False) -> BlockingScheduler | BackgroundS
         id="build_weekly_digest",
         replace_existing=True,
     )
+    if getattr(settings, "enable_daily_digest", False):
+        scheduler.add_job(
+            run_build_daily_digest,
+            CronTrigger(day_of_week="mon-fri", hour=getattr(settings, "daily_digest_hour", 7), minute=0),
+            id="build_daily_digest",
+            replace_existing=True,
+        )
     return scheduler
 
 

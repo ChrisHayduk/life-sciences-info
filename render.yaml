@@ -16,7 +16,17 @@ services:
           name: life-sciences-intel-db
           property: connectionString
       - key: OPENAI_MODEL
-        value: gpt-5-mini
+        value: gpt-5.4-mini
+      - key: OPENAI_MODEL_SUMMARY_SHORT
+        value: gpt-5.4-mini
+      - key: OPENAI_MODEL_SUMMARY_FULL
+        value: gpt-5.4
+      - key: OPENAI_MODEL_DIFF
+        value: gpt-5.4
+      - key: OPENAI_MODEL_DIGEST
+        value: gpt-5.4
+      - key: OPENAI_MODEL_MANUAL
+        value: gpt-5.4
       - key: MARKET_DATA_PROVIDER
         value: fmp
       - key: CLINICAL_TRIALS_PROVIDER
@@ -29,26 +39,54 @@ services:
         value: "true"
       - key: ENABLE_BROWSER_PDF_RENDERING
         value: "true"
+      - key: DAILY_AI_BUDGET_USD
+        value: "1.00"
+      - key: AI_BUDGET_NEWS_SHARE
+        value: "0.45"
+      - key: AI_BUDGET_FILING_SHARE
+        value: "0.25"
+      - key: AI_BUDGET_DIFF_SHARE
+        value: "0.10"
+      - key: AI_BUDGET_OVERRIDE_SHARE
+        value: "0.10"
+      - key: AI_BUDGET_DIGEST_SHARE
+        value: "0.10"
       - key: MAX_FILING_SUMMARIES_PER_DAY
-        value: "3"
+        value: "16"
       - key: MAX_NEWS_SUMMARIES_PER_DAY
-        value: "7"
+        value: "38"
       - key: MAX_OVERRIDE_SUMMARIES_PER_DAY
-        value: "2"
+        value: "8"
       - key: MAX_FILING_SUMMARIES_PER_RUN
-        value: "2"
+        value: "3"
       - key: MAX_NEWS_SUMMARIES_PER_RUN
+        value: "8"
+      - key: MAX_FILING_FULL_AI_PER_DAY
         value: "4"
+      - key: MAX_FILING_SHORT_AI_PER_DAY
+        value: "12"
+      - key: MAX_NEWS_FULL_AI_PER_DAY
+        value: "8"
+      - key: MAX_NEWS_SHORT_AI_PER_DAY
+        value: "30"
+      - key: MAX_FILING_DIFFS_PER_DAY
+        value: "8"
+      - key: MAX_DIGEST_GENERATIONS_PER_DAY
+        value: "2"
       - key: COMPANY_IR_TOP_COMPANY_LIMIT
-        value: "25"
+        value: "50"
       - key: CATALYST_LOOKAHEAD_DAYS
         value: "180"
       - key: RECENT_CATALYST_DAYS
         value: "90"
       - key: FILING_SUMMARY_BACKLOG_DAYS
-        value: "14"
+        value: "21"
       - key: NEWS_SUMMARY_BACKLOG_DAYS
-        value: "3"
+        value: "5"
+      - key: ENABLE_DAILY_DIGEST
+        value: "true"
+      - key: DAILY_DIGEST_HOUR
+        value: "7"
       - key: SEC_USER_AGENT
         sync: false
       - key: OPENAI_API_KEY

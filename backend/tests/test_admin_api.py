@@ -124,9 +124,93 @@ def test_events_stream_returns_204_when_disabled(client):
     assert response.status_code == 204
 
 
+def test_dashboard_route_closes_request_scoped_services(client, monkeypatch):
+    closed: list[str] = []
+
+    class FakeFilingService:
+        def __init__(self, session):
+            self.session = session
+
+        def list_filings(self, **kwargs):
+            return []
+
+        def pending_queue_counts(self):
+            return {"filings_pending": 0, "filings_pending_full_ai": 0, "filings_pending_short_ai": 0}
+
+        def close(self):
+            closed.append("filing")
+
+    class FakeNewsService:
+        def __init__(self, session):
+            self.session = session
+
+        def list_news(self, **kwargs):
+            return []
+
+        def pending_queue_counts(self):
+            return {"news_pending": 0, "news_pending_full_ai": 0, "news_pending_short_ai": 0}
+
+        def close(self):
+            closed.append("news")
+
+    class FakeDigestService:
+        def __init__(self, session):
+            self.session = session
+
+        def list_digests(self, limit=1):
+            return []
+
+        def close(self):
+            closed.append("digest")
+
+    class FakeClinicalTrialsService:
+        def __init__(self, session):
+            self.session = session
+
+        def list_trials(self, **kwargs):
+            return []
+
+        def close(self):
+            closed.append("trials")
+
+    class FakeRegulatoryEventService:
+        def __init__(self, session):
+            self.session = session
+
+        def list_timeline_events(self, **kwargs):
+            return []
+
+        def close(self):
+            closed.append("regulatory")
+
+    class FakeWatchlistService:
+        def __init__(self, session):
+            self.session = session
+
+        def build_dashboard_highlights(self, **kwargs):
+            return []
+
+        def close(self):
+            closed.append("watchlists")
+
+    monkeypatch.setattr("app.api.routes.FilingService", FakeFilingService)
+    monkeypatch.setattr("app.api.routes.NewsService", FakeNewsService)
+    monkeypatch.setattr("app.api.routes.DigestService", FakeDigestService)
+    monkeypatch.setattr("app.api.routes.ClinicalTrialsService", FakeClinicalTrialsService)
+    monkeypatch.setattr("app.api.routes.RegulatoryEventService", FakeRegulatoryEventService)
+    monkeypatch.setattr("app.api.routes.WatchlistService", FakeWatchlistService)
+
+    response = client.get("/api/v1/dashboard")
+
+    assert response.status_code == 200
+    assert set(closed) == {"filing", "news", "digest", "trials", "regulatory", "watchlists"}
+
+
 def test_health_reports_event_listener_count(client):
     response = client.get("/health")
 
     assert response.status_code == 200
     assert "event_listener_count" in response.json()
     assert "event_stream_enabled" in response.json()
+    assert "rss_mb" in response.json()
+    assert "thread_count" in response.json()

@@ -8,7 +8,6 @@ import time
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.jobs import (
@@ -62,45 +61,52 @@ def _logged_job(name: str, fn, **kwargs):
 def build_scheduler(background: bool = False) -> BlockingScheduler | BackgroundScheduler:
     settings = get_settings()
     scheduler_class = BackgroundScheduler if background else BlockingScheduler
-    scheduler = scheduler_class(timezone=settings.timezone)
+    scheduler = scheduler_class(
+        timezone=settings.timezone,
+        job_defaults={
+            "coalesce": True,
+            "max_instances": 1,
+            "misfire_grace_time": 3600,
+        },
+    )
     scheduler.add_job(
         _logged_job,
-        IntervalTrigger(minutes=30),
+        CronTrigger(minute="5,35"),
         kwargs={"name": "poll_sec_filings", "fn": run_poll_sec_filings},
         id="poll_sec_filings",
         replace_existing=True,
     )
     scheduler.add_job(
         _logged_job,
-        IntervalTrigger(hours=6),
+        CronTrigger(hour="1,7,13,19", minute=12),
         kwargs={"name": "ingest_news", "fn": run_ingest_news},
         id="ingest_news",
         replace_existing=True,
     )
     scheduler.add_job(
         _logged_job,
-        IntervalTrigger(hours=12),
+        CronTrigger(hour="3,15", minute=18),
         kwargs={"name": "poll_regulatory_events", "fn": run_poll_regulatory_events},
         id="poll_regulatory_events",
         replace_existing=True,
     )
     scheduler.add_job(
         _logged_job,
-        IntervalTrigger(days=7),
+        CronTrigger(day_of_week="sun", hour=1, minute=5),
         kwargs={"name": "poll_trials", "fn": run_poll_trials, "limit": None},
         id="poll_trials",
         replace_existing=True,
     )
     scheduler.add_job(
         _logged_job,
-        IntervalTrigger(days=7),
+        CronTrigger(day_of_week="sun", hour=2, minute=5),
         kwargs={"name": "sync_universe", "fn": run_sync_universe},
         id="sync_universe",
         replace_existing=True,
     )
     scheduler.add_job(
         _logged_job,
-        IntervalTrigger(days=7),
+        CronTrigger(day_of_week="sun", hour=3, minute=5),
         kwargs={"name": "refresh_market_caps", "fn": run_refresh_market_caps, "count": None},
         id="refresh_market_caps",
         replace_existing=True,

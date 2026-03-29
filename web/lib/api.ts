@@ -304,6 +304,22 @@ const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000
   .replace(/\/$/, "");
 const API_REQUEST_TIMEOUT_MS = 8000;
 
+function logApiFailure(path: string, error: unknown, extra?: Record<string, unknown>) {
+  if (typeof window !== "undefined") {
+    return;
+  }
+  const detail =
+    error instanceof Error
+      ? { name: error.name, message: error.message, stack: error.stack }
+      : { message: String(error) };
+  console.error("[api] request failed", {
+    path,
+    apiBase: API_BASE,
+    ...extra,
+    ...detail,
+  });
+}
+
 async function fetchJSON<T>(path: string, revalidate?: number): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
@@ -315,13 +331,18 @@ async function fetchJSON<T>(path: string, revalidate?: number): Promise<T> {
       signal: controller.signal,
     });
     if (!response.ok) {
-      throw new Error(`Failed to fetch ${path}: ${response.status}`);
+      const error = new Error(`Failed to fetch ${path}: ${response.status}`);
+      logApiFailure(path, error, { status: response.status, revalidate });
+      throw error;
     }
     return response.json() as Promise<T>;
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`Failed to fetch ${path}: request timed out after ${API_REQUEST_TIMEOUT_MS}ms`);
+      const timeoutError = new Error(`Failed to fetch ${path}: request timed out after ${API_REQUEST_TIMEOUT_MS}ms`);
+      logApiFailure(path, timeoutError, { timeoutMs: API_REQUEST_TIMEOUT_MS, revalidate });
+      throw timeoutError;
     }
+    logApiFailure(path, error, { revalidate });
     throw error;
   } finally {
     clearTimeout(timeout);

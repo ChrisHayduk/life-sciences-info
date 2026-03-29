@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -33,6 +34,21 @@ class WatchlistService:
         self.trials_service = ClinicalTrialsService(session)
         self.catalyst_service = CatalystService(session)
         self.regulatory_service = RegulatoryEventService(session)
+
+    def close(self) -> None:
+        for service in (
+            self.regulatory_service,
+            self.trials_service,
+            self.news_service,
+            self.filing_service,
+        ):
+            with contextlib.suppress(Exception):
+                close = getattr(service, "close", None)
+                if callable(close):
+                    close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def list_watchlists(self) -> list[Watchlist]:
         return self.session.scalars(select(Watchlist).order_by(Watchlist.created_at.desc())).all()

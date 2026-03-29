@@ -3,7 +3,7 @@ from __future__ import annotations
 from secrets import compare_digest
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -45,6 +45,37 @@ from app.services.universe import UniverseService, describe_universe_reason
 from app.services.watchlists import WatchlistService
 
 router = APIRouter()
+
+
+def _normalize_origin(value: str | None) -> str | None:
+    from urllib.parse import urlparse
+
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    stripped = value.strip().rstrip("/")
+    return stripped or None
+
+
+def _sse_cors_headers(request: Request) -> dict[str, str]:
+    origin = _normalize_origin(request.headers.get("origin"))
+    settings = get_settings()
+    allowed = {_normalize_origin(item) for item in settings.cors_origins}
+    allowed.add(_normalize_origin(settings.frontend_base_url))
+    allowed = {item for item in allowed if item}
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+    if origin and (origin in allowed or (origin.endswith(".vercel.app") and (_normalize_origin(settings.frontend_base_url) or "").endswith(".vercel.app"))):
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Access-Control-Allow-Credentials"] = "true"
+        headers["Vary"] = "Origin"
+    return headers
 
 
 def build_company_response(company: Company) -> CompanyResponse:
@@ -399,12 +430,12 @@ def filing_pdf(filing_id: int, session: Session = Depends(get_session)):
 
 
 @router.get("/events/stream")
-async def events_sse():
+async def events_sse(request: Request):
     """Server-Sent Events endpoint for real-time notifications."""
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers=_sse_cors_headers(request),
     )
 
 

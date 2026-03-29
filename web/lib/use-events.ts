@@ -23,15 +23,27 @@ export function useEventStream() {
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
+    if (process.env.NEXT_PUBLIC_ENABLE_EVENT_STREAM === "false") {
+      return;
+    }
     const url = `${API_BASE}/events/stream`;
     let es: EventSource;
     let reconnectTimeout: ReturnType<typeof setTimeout>;
+    let reconnectAttempts = 0;
+    let stopped = false;
     // Only show toasts for events after connection time
     const connectedAt = Date.now() / 1000;
 
     function connect() {
+      if (stopped) {
+        return;
+      }
       es = new EventSource(url);
       eventSourceRef.current = es;
+
+      es.onopen = () => {
+        reconnectAttempts = 0;
+      };
 
       es.onmessage = (event) => {
         try {
@@ -49,14 +61,19 @@ export function useEventStream() {
 
       es.onerror = () => {
         es.close();
-        // Reconnect after 5 seconds
-        reconnectTimeout = setTimeout(connect, 5000);
+        reconnectAttempts += 1;
+        if (reconnectAttempts >= 3) {
+          stopped = true;
+          return;
+        }
+        reconnectTimeout = setTimeout(connect, 5000 * reconnectAttempts);
       };
     }
 
     connect();
 
     return () => {
+      stopped = true;
       clearTimeout(reconnectTimeout);
       es?.close();
     };

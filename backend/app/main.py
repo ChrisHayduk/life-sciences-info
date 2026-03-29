@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import logging
 from threading import Thread
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,32 @@ from app.db import init_db
 from app.scheduler import build_scheduler
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_origin(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    stripped = value.strip().rstrip("/")
+    return stripped or None
+
+
+def _cors_allow_origins() -> list[str]:
+    configured = [_normalize_origin(origin) for origin in settings.cors_origins]
+    frontend_origin = _normalize_origin(settings.frontend_base_url)
+    origins = [origin for origin in configured if origin]
+    if frontend_origin and frontend_origin not in origins:
+        origins.append(frontend_origin)
+    return origins
+
+
+def _cors_allow_origin_regex() -> str | None:
+    frontend_origin = _normalize_origin(settings.frontend_base_url)
+    if frontend_origin and frontend_origin.endswith(".vercel.app"):
+        return r"https://.*\.vercel\.app"
+    return None
 
 
 def _initialize_runtime(app: FastAPI) -> None:
@@ -53,7 +80,8 @@ settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=_cors_allow_origins(),
+    allow_origin_regex=_cors_allow_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

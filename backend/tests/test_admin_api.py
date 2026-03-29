@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from starlette.requests import Request
+
 from app.config import get_settings
 
 
@@ -93,3 +95,24 @@ def test_admin_poll_trials_route_supports_focus_tickers(client, monkeypatch):
     assert response.status_code == 200
     assert "Provider aact_cloud" in response.json()["message"]
     assert "5 new trials" in response.json()["message"]
+
+
+def test_events_stream_returns_cors_headers_for_frontend_origin(monkeypatch):
+    monkeypatch.setenv("FRONTEND_BASE_URL", "https://life-sciences-info.vercel.app")
+    monkeypatch.setenv("CORS_ORIGINS", "")
+    get_settings.cache_clear()
+
+    from app.api.routes import _sse_cors_headers
+
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/events/stream",
+            "headers": [(b"origin", b"https://life-sciences-info.vercel.app")],
+        }
+    )
+    headers = _sse_cors_headers(request)
+
+    assert headers["Access-Control-Allow-Origin"] == "https://life-sciences-info.vercel.app"
+    assert headers["Access-Control-Allow-Credentials"] == "true"

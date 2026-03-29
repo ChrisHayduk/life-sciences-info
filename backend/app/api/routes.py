@@ -432,6 +432,8 @@ def filing_pdf(filing_id: int, session: Session = Depends(get_session)):
 @router.get("/events/stream")
 async def events_sse(request: Request):
     """Server-Sent Events endpoint for real-time notifications."""
+    if not get_settings().enable_event_stream:
+        return Response(status_code=204, headers=_sse_cors_headers(request))
     return StreamingResponse(
         event_stream(request),
         media_type="text/event-stream",

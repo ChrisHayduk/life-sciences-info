@@ -118,8 +118,15 @@ def test_events_stream_returns_cors_headers_for_frontend_origin(monkeypatch):
     assert headers["Access-Control-Allow-Credentials"] == "true"
 
 
+def test_events_stream_returns_204_when_disabled(client):
+    response = client.get("/api/v1/events/stream")
+
+    assert response.status_code == 204
+
+
 def test_health_reports_event_listener_count(client):
     response = client.get("/health")
 
     assert response.status_code == 200
     assert "event_listener_count" in response.json()
+    assert "event_stream_enabled" in response.json()

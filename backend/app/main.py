@@ -100,6 +100,7 @@ def healthcheck() -> dict[str, str | bool | int | None]:
         "ready": runtime_ready,
         "db_ready": db_ready,
         "scheduler_enabled": settings.enable_scheduler,
+        "event_stream_enabled": settings.enable_event_stream,
         "event_listener_count": listener_count(),
         "startup_error": startup_error,
     }

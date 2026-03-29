@@ -299,17 +299,33 @@ export type TrialFilters = {
   search?: string;
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1";
+const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000/api/v1")
+  .trim()
+  .replace(/\/$/, "");
+const API_REQUEST_TIMEOUT_MS = 8000;
 
 async function fetchJSON<T>(path: string, revalidate?: number): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    next: revalidate !== undefined ? { revalidate } : undefined,
-    cache: revalidate !== undefined ? undefined : "no-store",
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to fetch ${path}: ${response.status}`);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      next: revalidate !== undefined ? { revalidate } : undefined,
+      cache: revalidate !== undefined ? undefined : "no-store",
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to fetch ${path}: ${response.status}`);
+    }
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Failed to fetch ${path}: request timed out after ${API_REQUEST_TIMEOUT_MS}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return response.json() as Promise<T>;
 }
 
 function buildQuery(params: Record<string, string | number | undefined>): string {

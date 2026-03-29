@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -19,11 +20,20 @@ class FilingDocument:
 class SECClient:
     def __init__(self, http_client: httpx.Client | None = None) -> None:
         self.settings = get_settings()
+        self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client(
             timeout=self.settings.source_fetch_timeout_seconds,
             headers={"User-Agent": self.settings.sec_user_agent},
             follow_redirects=True,
         )
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            with contextlib.suppress(Exception):
+                self.http_client.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def _throttle(self) -> None:
         time.sleep(self.settings.sec_rate_limit_delay_seconds)

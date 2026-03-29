@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -35,6 +36,15 @@ class DigestService:
         self.session = session
         self.settings = get_settings()
         self.summarizer = OpenAISummarizer()
+        self._owns_summarizer = True
+
+    def close(self) -> None:
+        if self._owns_summarizer:
+            with contextlib.suppress(Exception):
+                self.summarizer.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def build_weekly_digest(self, reference: datetime | None = None) -> Digest:
         window_start, window_end = weekly_digest_window(reference, self.settings.timezone)

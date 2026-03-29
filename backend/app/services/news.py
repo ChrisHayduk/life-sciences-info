@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 from datetime import datetime, timedelta, timezone
@@ -146,9 +147,22 @@ class NewsService:
         http_client: httpx.Client | None = None,
     ) -> None:
         self.session = session
+        self._owns_summarizer = summarizer is None
+        self._owns_http_client = http_client is None
         self.summarizer = summarizer or OpenAISummarizer()
         self.http_client = http_client or httpx.Client(timeout=get_settings().source_fetch_timeout_seconds, follow_redirects=True)
         self.settings = get_settings()
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            with contextlib.suppress(Exception):
+                self.http_client.close()
+        if self._owns_summarizer:
+            with contextlib.suppress(Exception):
+                self.summarizer.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def ingest_feeds(self) -> int:
         companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()

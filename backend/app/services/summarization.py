@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from dataclasses import dataclass
@@ -188,7 +189,16 @@ class DigestCallResult:
 class OpenAISummarizer:
     def __init__(self, http_client: httpx.Client | None = None) -> None:
         self.settings = get_settings()
+        self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client(timeout=60.0)
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            with contextlib.suppress(Exception):
+                self.http_client.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def summarize(
         self,

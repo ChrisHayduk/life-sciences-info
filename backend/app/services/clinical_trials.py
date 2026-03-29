@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import unicodedata
@@ -153,6 +154,9 @@ class TrialProvider:
     def fetch_company_trials(self, company: Company, max_results: int | None = None) -> list[TrialPayload]:
         raise NotImplementedError
 
+    def close(self) -> None:
+        return None
+
 
 class NoopTrialProvider(TrialProvider):
     def __init__(self, provider_name: str, reason: str) -> None:
@@ -171,6 +175,7 @@ class ClinicalTrialsGovApiProvider(TrialProvider):
 
     def __init__(self, http_client: httpx.Client | None = None) -> None:
         self.settings = get_settings()
+        self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client(
             timeout=self.settings.source_fetch_timeout_seconds,
             follow_redirects=True,
@@ -179,6 +184,11 @@ class ClinicalTrialsGovApiProvider(TrialProvider):
                 "Accept": "application/json",
             },
         )
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            with contextlib.suppress(Exception):
+                self.http_client.close()
 
     def fetch_company_trials(self, company: Company, max_results: int | None = None) -> list[TrialPayload]:
         payloads: dict[str, TrialPayload] = {}
@@ -510,6 +520,15 @@ class ClinicalTrialsService:
         self._provider_override = provider
         self._aact_connection_factory = aact_connection_factory
         self._provider: TrialProvider | None = None
+
+    def close(self) -> None:
+        provider = self._provider
+        if self._provider_override is None and provider is not None:
+            with contextlib.suppress(Exception):
+                provider.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def poll_trials_for_company(self, company: Company, max_results: int = 50) -> dict[str, int]:
         provider = self._trial_provider()

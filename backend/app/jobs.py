@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 
 from sqlalchemy import select
 
@@ -24,18 +25,30 @@ def _with_session(callback):
         session.close()
 
 
+def _close_if_possible(value) -> None:
+    close = getattr(value, "close", None)
+    if callable(close):
+        with contextlib.suppress(Exception):
+            close()
+
+
 def run_sync_universe(
     limit: int | None = None,
     progress_callback=None,
     progress_every: int = 100,
 ) -> int:
-    return _with_session(
-        lambda session: UniverseService(session).sync_universe(
-            limit=limit,
-            progress_callback=progress_callback,
-            progress_every=progress_every,
-        )
-    )
+    def _run(session):
+        service = UniverseService(session)
+        try:
+            return service.sync_universe(
+                limit=limit,
+                progress_callback=progress_callback,
+                progress_every=progress_every,
+            )
+        finally:
+            _close_if_possible(service)
+
+    return _with_session(_run)
 
 
 def _load_active_companies(session, focus_tickers: list[str] | None = None) -> list[Company]:
@@ -54,24 +67,32 @@ def run_refresh_market_caps(
     progress_every: int = 100,
 ) -> dict[str, int | str | None]:
     def _run(session):
-        companies = _load_active_companies(session, focus_tickers=focus_tickers)
-        selected = companies[:count] if count else companies
-        result = MarketCapService(session).refresh_market_caps(
-            selected,
-            progress_callback=progress_callback,
-            progress_every=progress_every,
-        )
-        selected_company_ids = [int(company.id) for company in selected]
-        reranked_filings = FilingService(session).rerank_for_companies(selected_company_ids)
-        reranked_news = NewsService(session).rerank_for_companies(selected_company_ids)
-        return {
-            "companies": int(result.get("companies") or 0),
-            "refreshed": int(result.get("refreshed") or 0),
-            "failed": int(result.get("failed") or 0),
-            "last_error": result.get("last_error"),
-            "reranked_filings": reranked_filings,
-            "reranked_news": reranked_news,
-        }
+        market_service = MarketCapService(session)
+        filing_service = FilingService(session)
+        news_service = NewsService(session)
+        try:
+            companies = _load_active_companies(session, focus_tickers=focus_tickers)
+            selected = companies[:count] if count else companies
+            result = market_service.refresh_market_caps(
+                selected,
+                progress_callback=progress_callback,
+                progress_every=progress_every,
+            )
+            selected_company_ids = [int(company.id) for company in selected]
+            reranked_filings = filing_service.rerank_for_companies(selected_company_ids)
+            reranked_news = news_service.rerank_for_companies(selected_company_ids)
+            return {
+                "companies": int(result.get("companies") or 0),
+                "refreshed": int(result.get("refreshed") or 0),
+                "failed": int(result.get("failed") or 0),
+                "last_error": result.get("last_error"),
+                "reranked_filings": reranked_filings,
+                "reranked_news": reranked_news,
+            }
+        finally:
+            _close_if_possible(news_service)
+            _close_if_possible(filing_service)
+            _close_if_possible(market_service)
 
     return _with_session(_run)
 
@@ -82,14 +103,19 @@ def run_backfill_company(
     since_date=None,
     years_back: int | None = None,
 ) -> int:
-    return _with_session(
-        lambda session: FilingService(session).backfill_company(
-            company_id,
-            max_filings=max_filings,
-            since_date=since_date,
-            years_back=years_back,
-        )
-    )
+    def _run(session):
+        service = FilingService(session)
+        try:
+            return service.backfill_company(
+                company_id,
+                max_filings=max_filings,
+                since_date=since_date,
+                years_back=years_back,
+            )
+        finally:
+            _close_if_possible(service)
+
+    return _with_session(_run)
 
 
 def run_backfill_top_companies(
@@ -104,15 +130,18 @@ def run_backfill_top_companies(
         companies = _load_active_companies(session, focus_tickers=focus_tickers)
         selected = companies[:count]
         filing_service = FilingService(session)
-        created = 0
-        for company in selected:
-            created += filing_service.backfill_company(
-                company.id,
-                max_filings=max_filings,
-                since_date=since_date,
-                years_back=years_back,
-            )
-        return created
+        try:
+            created = 0
+            for company in selected:
+                created += filing_service.backfill_company(
+                    company.id,
+                    max_filings=max_filings,
+                    since_date=since_date,
+                    years_back=years_back,
+                )
+            return created
+        finally:
+            _close_if_possible(filing_service)
 
     return _with_session(_run)
 
@@ -120,14 +149,17 @@ def run_backfill_top_companies(
 def run_poll_sec_filings() -> dict[str, int]:
     def _run(session):
         service = FilingService(session)
-        new_filings = service.poll_new_filings()
-        summary_result = service.summarize_pending(limit=service.settings.max_filing_summaries_per_run, automated=True)
-        return {
-            "new_items": new_filings,
-            "summarized": int(summary_result["summarized"]),
-            "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
-            "remaining_daily_budget_usd": float(summary_result.get("remaining_daily_budget_usd") or 0.0),
-        }
+        try:
+            new_filings = service.poll_new_filings()
+            summary_result = service.summarize_pending(limit=service.settings.max_filing_summaries_per_run, automated=True)
+            return {
+                "new_items": new_filings,
+                "summarized": int(summary_result["summarized"]),
+                "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
+                "remaining_daily_budget_usd": float(summary_result.get("remaining_daily_budget_usd") or 0.0),
+            }
+        finally:
+            _close_if_possible(service)
 
     return _with_session(_run)
 
@@ -135,21 +167,28 @@ def run_poll_sec_filings() -> dict[str, int]:
 def run_ingest_news() -> dict[str, int]:
     def _run(session):
         service = NewsService(session)
-        new_items = service.ingest_feeds()
-        summary_result = service.summarize_pending(limit=service.settings.max_news_summaries_per_run, automated=True)
-        return {
-            "new_items": new_items,
-            "summarized": int(summary_result["summarized"]),
-            "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
-            "remaining_daily_budget_usd": float(summary_result.get("remaining_daily_budget_usd") or 0.0),
-        }
+        try:
+            new_items = service.ingest_feeds()
+            summary_result = service.summarize_pending(limit=service.settings.max_news_summaries_per_run, automated=True)
+            return {
+                "new_items": new_items,
+                "summarized": int(summary_result["summarized"]),
+                "remaining_daily_budget": int(summary_result["remaining_daily_budget"]),
+                "remaining_daily_budget_usd": float(summary_result.get("remaining_daily_budget_usd") or 0.0),
+            }
+        finally:
+            _close_if_possible(service)
 
     return _with_session(_run)
 
 
 def run_poll_regulatory_events(*, limit: int | None = None) -> dict[str, int]:
     def _run(session):
-        return RegulatoryEventService(session).poll_fda_advisory_calendar(limit=limit)
+        service = RegulatoryEventService(session)
+        try:
+            return service.poll_fda_advisory_calendar(limit=limit)
+        finally:
+            _close_if_possible(service)
 
     result = _with_session(_run)
     return {
@@ -164,7 +203,11 @@ def run_poll_trials(*, limit: int | None = None, focus_tickers: list[str] | None
     def _run(session):
         companies = _load_active_companies(session, focus_tickers=focus_tickers)
         selected = companies[:limit] if limit else companies
-        return ClinicalTrialsService(session).poll_companies(selected)
+        service = ClinicalTrialsService(session)
+        try:
+            return service.poll_companies(selected)
+        finally:
+            _close_if_possible(service)
 
     result = _with_session(_run)
     return {
@@ -187,11 +230,15 @@ def run_retag_news_companies(
     focus_tickers: list[str] | None = None,
 ) -> dict[str, int]:
     def _run(session):
-        return NewsService(session).retag_company_news(
-            limit=limit,
-            recent_days=recent_days,
-            focus_tickers=focus_tickers,
-        )
+        service = NewsService(session)
+        try:
+            return service.retag_company_news(
+                limit=limit,
+                recent_days=recent_days,
+                focus_tickers=focus_tickers,
+            )
+        finally:
+            _close_if_possible(service)
 
     result = _with_session(_run)
     return {
@@ -202,12 +249,26 @@ def run_retag_news_companies(
 
 
 def run_build_weekly_digest() -> int:
-    digest = _with_session(lambda session: DigestService(session).build_weekly_digest())
+    def _run(session):
+        service = DigestService(session)
+        try:
+            return service.build_weekly_digest()
+        finally:
+            _close_if_possible(service)
+
+    digest = _with_session(_run)
     return digest.id
 
 
 def run_build_daily_digest() -> int:
-    digest = _with_session(lambda session: DigestService(session).build_daily_digest())
+    def _run(session):
+        service = DigestService(session)
+        try:
+            return service.build_daily_digest()
+        finally:
+            _close_if_possible(service)
+
+    digest = _with_session(_run)
     return digest.id
 
 
@@ -219,14 +280,24 @@ def run_summarize_pending(
     automated: bool = False,
 ) -> dict[str, int]:
     def _run(session):
+        filing_service = None
+        news_service = None
         if kind == "filing":
-            return FilingService(session).summarize_pending(
-                limit=limit,
-                automated=automated,
-                include_historical=include_historical,
-            )
+            filing_service = FilingService(session)
+            try:
+                return filing_service.summarize_pending(
+                    limit=limit,
+                    automated=automated,
+                    include_historical=include_historical,
+                )
+            finally:
+                _close_if_possible(filing_service)
         if kind == "news":
-            return NewsService(session).summarize_pending(limit=limit, automated=automated)
+            news_service = NewsService(session)
+            try:
+                return news_service.summarize_pending(limit=limit, automated=automated)
+            finally:
+                _close_if_possible(news_service)
         raise ValueError("kind must be 'filing' or 'news'")
 
     result = _with_session(_run)
@@ -240,28 +311,47 @@ def run_summarize_pending(
 def run_resummarize_item(kind: str, item_id: int) -> int:
     def _run(session):
         if kind == "filing":
-            FilingService(session).summarize_item(item_id, consume_override_budget=False, force=True)
-            return item_id
+            service = FilingService(session)
+            try:
+                service.summarize_item(item_id, consume_override_budget=False, force=True)
+                return item_id
+            finally:
+                _close_if_possible(service)
 
         if kind != "news":
             raise ValueError("kind must be 'filing' or 'news'")
 
-        NewsService(session).summarize_item(item_id, consume_override_budget=False, force=True)
-        return item_id
+        service = NewsService(session)
+        try:
+            service.summarize_item(item_id, consume_override_budget=False, force=True)
+            return item_id
+        finally:
+            _close_if_possible(service)
 
     return _with_session(_run)
 
 
 def run_reprocess_filing(item_id: int) -> int:
     def _run(session):
-        FilingService(session).reprocess_existing_filing(item_id)
-        return item_id
+        service = FilingService(session)
+        try:
+            service.reprocess_existing_filing(item_id)
+            return item_id
+        finally:
+            _close_if_possible(service)
 
     return _with_session(_run)
 
 
 def run_reprocess_company_filings(company_id: int, limit: int | None = None) -> int:
-    return _with_session(lambda session: FilingService(session).reprocess_company_filings(company_id, limit=limit))
+    def _run(session):
+        service = FilingService(session)
+        try:
+            return service.reprocess_company_filings(company_id, limit=limit)
+        finally:
+            _close_if_possible(service)
+
+    return _with_session(_run)
 
 
 def run_refresh_all_data(
@@ -277,12 +367,15 @@ def run_refresh_all_data(
 ) -> dict[str, int]:
     def _sync(session):
         universe_service = UniverseService(session, only_tickers=focus_tickers)
-        synced = universe_service.sync_universe(
-            limit=sync_limit,
-            progress_callback=lambda message: print(message, flush=True),
-            progress_every=progress_every,
-        )
-        return synced
+        try:
+            synced = universe_service.sync_universe(
+                limit=sync_limit,
+                progress_callback=lambda message: print(message, flush=True),
+                progress_every=progress_every,
+            )
+            return synced
+        finally:
+            _close_if_possible(universe_service)
 
     synced = _with_session(_sync)
 
@@ -319,13 +412,16 @@ def run_refresh_all_data(
     for index, company in enumerate(selected, start=1):
         def _refresh_company(session):
             filing_service = FilingService(session)
-            reprocessed = filing_service.reprocess_company_filings(company["id"], resummarize=False)
-            added = filing_service.backfill_company(
-                company["id"],
-                max_filings=max_filings,
-                years_back=years_back,
-            )
-            return reprocessed, added
+            try:
+                reprocessed = filing_service.reprocess_company_filings(company["id"], resummarize=False)
+                added = filing_service.backfill_company(
+                    company["id"],
+                    max_filings=max_filings,
+                    years_back=years_back,
+                )
+                return reprocessed, added
+            finally:
+                _close_if_possible(filing_service)
 
         reprocessed, added = _with_session(_refresh_company)
         reprocessed_total += reprocessed
@@ -355,7 +451,14 @@ def run_refresh_all_data(
 
     digest_count = 0
     if build_digest:
-        digest = _with_session(lambda session: DigestService(session).build_weekly_digest())
+        def _digest(session):
+            service = DigestService(session)
+            try:
+                return service.build_weekly_digest()
+            finally:
+                _close_if_possible(service)
+
+        digest = _with_session(_digest)
         digest_count = 1 if digest else 0
         print(f"Weekly digest ready: {digest.id} {digest.title}", flush=True)
 

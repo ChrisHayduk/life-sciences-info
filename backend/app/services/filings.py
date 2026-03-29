@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 from collections.abc import Iterable
@@ -482,11 +483,28 @@ class FilingService:
         object_store: ObjectStore | None = None,
     ) -> None:
         self.session = session
+        self._owns_sec_client = sec_client is None
+        self._owns_summarizer = summarizer is None
+        self._owns_market_data_client = market_data_client is None
         self.sec_client = sec_client or SECClient()
         self.summarizer = summarizer or OpenAISummarizer()
         self.market_data_client = market_data_client or MarketDataClient()
         self.object_store = object_store or ObjectStore()
         self.settings = get_settings()
+
+    def close(self) -> None:
+        if self._owns_sec_client:
+            with contextlib.suppress(Exception):
+                self.sec_client.close()
+        if self._owns_summarizer:
+            with contextlib.suppress(Exception):
+                self.summarizer.close()
+        if self._owns_market_data_client:
+            with contextlib.suppress(Exception):
+                self.market_data_client.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def backfill_company(
         self,

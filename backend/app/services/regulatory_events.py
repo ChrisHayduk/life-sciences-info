@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any, Iterable
@@ -24,11 +25,20 @@ class RegulatoryEventService:
     def __init__(self, session: Session, http_client: httpx.Client | None = None) -> None:
         self.session = session
         self.settings = get_settings()
+        self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client(
             timeout=self.settings.source_fetch_timeout_seconds,
             follow_redirects=True,
             headers={"User-Agent": self.settings.sec_user_agent},
         )
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            with contextlib.suppress(Exception):
+                self.http_client.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def poll_fda_advisory_calendar(self, *, limit: int | None = None) -> dict[str, int]:
         companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()

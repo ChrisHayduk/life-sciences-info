@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable, Iterable
 
 from sqlalchemy.orm import Session
@@ -11,7 +12,16 @@ from app.services.market_data import MarketDataClient
 class MarketCapService:
     def __init__(self, session: Session, market_data_client: MarketDataClient | None = None) -> None:
         self.session = session
+        self._owns_market_data_client = market_data_client is None
         self.market_data_client = market_data_client or MarketDataClient()
+
+    def close(self) -> None:
+        if self._owns_market_data_client:
+            with contextlib.suppress(Exception):
+                self.market_data_client.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def refresh_company_market_cap(self, company: Company) -> bool:
         try:

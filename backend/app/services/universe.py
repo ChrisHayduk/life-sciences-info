@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from typing import Iterable
 
@@ -43,10 +44,19 @@ class UniverseService:
         only_tickers: Iterable[str] | None = None,
     ) -> None:
         self.session = session
+        self._owns_sec_client = sec_client is None
         self.sec_client = sec_client or SECClient()
         self.allowlist = {value.upper() for value in (allowlist or [])}
         self.denylist = {value.upper() for value in (denylist or [])}
         self.only_tickers = {value.upper() for value in (only_tickers or [])}
+
+    def close(self) -> None:
+        if self._owns_sec_client:
+            with contextlib.suppress(Exception):
+                self.sec_client.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def sync_universe(
         self,

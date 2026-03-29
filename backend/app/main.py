@@ -1,5 +1,8 @@
 from contextlib import asynccontextmanager
 import logging
+import resource
+import sys
+import threading
 from threading import Thread
 from urllib.parse import urlparse
 
@@ -13,6 +16,13 @@ from app.scheduler import build_scheduler
 from app.services.events import listener_count
 
 logger = logging.getLogger(__name__)
+
+
+def _process_rss_mb() -> float:
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return round(rss / (1024 * 1024), 2)
+    return round(rss / 1024, 2)
 
 
 def _normalize_origin(value: str | None) -> str | None:
@@ -91,7 +101,7 @@ app.include_router(router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
-def healthcheck() -> dict[str, str | bool | int | None]:
+def healthcheck() -> dict[str, str | bool | int | float | None]:
     startup_error = getattr(app.state, "startup_error", None)
     runtime_ready = getattr(app.state, "runtime_ready", False)
     db_ready = getattr(app.state, "db_ready", False)
@@ -102,5 +112,7 @@ def healthcheck() -> dict[str, str | bool | int | None]:
         "scheduler_enabled": settings.enable_scheduler,
         "event_stream_enabled": settings.enable_event_stream,
         "event_listener_count": listener_count(),
+        "rss_mb": _process_rss_mb(),
+        "thread_count": threading.active_count(),
         "startup_error": startup_error,
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,7 +20,16 @@ class MarketDataClient:
 
     def __init__(self, http_client: httpx.Client | None = None) -> None:
         self.settings = get_settings()
+        self._owns_http_client = http_client is None
         self.http_client = http_client or httpx.Client(timeout=self.settings.source_fetch_timeout_seconds)
+
+    def close(self) -> None:
+        if self._owns_http_client:
+            with contextlib.suppress(Exception):
+                self.http_client.close()
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def fetch_market_cap(self, ticker: str | None) -> dict:
         normalized = self._normalize_ticker(ticker)

@@ -433,7 +433,7 @@ def filing_pdf(filing_id: int, session: Session = Depends(get_session)):
 async def events_sse(request: Request):
     """Server-Sent Events endpoint for real-time notifications."""
     return StreamingResponse(
-        event_stream(),
+        event_stream(request),
         media_type="text/event-stream",
         headers=_sse_cors_headers(request),
     )

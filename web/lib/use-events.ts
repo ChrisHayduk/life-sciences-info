@@ -23,59 +23,41 @@ export function useEventStream() {
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    if (process.env.NEXT_PUBLIC_ENABLE_EVENT_STREAM === "false") {
+    if (process.env.NEXT_PUBLIC_ENABLE_EVENT_STREAM !== "true") {
       return;
     }
     const url = `${API_BASE}/events/stream`;
-    let es: EventSource;
-    let reconnectTimeout: ReturnType<typeof setTimeout>;
-    let reconnectAttempts = 0;
+    const es = new EventSource(url);
     let stopped = false;
     // Only show toasts for events after connection time
     const connectedAt = Date.now() / 1000;
+    eventSourceRef.current = es;
 
-    function connect() {
-      if (stopped) {
-        return;
+    es.onmessage = (event) => {
+      try {
+        const parsed: SSEEvent = JSON.parse(event.data);
+        // Only show toasts for new events (after connection)
+        if (parsed.timestamp > connectedAt) {
+          const label = EVENT_LABELS[parsed.type] ?? parsed.type;
+          const description = parsed.data?.message ?? parsed.data?.title ?? "";
+          toast(label, { description: String(description) });
+        }
+      } catch {
+        // Ignore malformed events
       }
-      es = new EventSource(url);
-      eventSourceRef.current = es;
+    };
 
-      es.onopen = () => {
-        reconnectAttempts = 0;
-      };
-
-      es.onmessage = (event) => {
-        try {
-          const parsed: SSEEvent = JSON.parse(event.data);
-          // Only show toasts for new events (after connection)
-          if (parsed.timestamp > connectedAt) {
-            const label = EVENT_LABELS[parsed.type] ?? parsed.type;
-            const description = parsed.data?.message ?? parsed.data?.title ?? "";
-            toast(label, { description: String(description) });
-          }
-        } catch {
-          // Ignore malformed events
-        }
-      };
-
-      es.onerror = () => {
+    es.onerror = () => {
+      // The event stream is a nice-to-have; fail closed instead of reconnecting forever.
+      if (!stopped) {
         es.close();
-        reconnectAttempts += 1;
-        if (reconnectAttempts >= 3) {
-          stopped = true;
-          return;
-        }
-        reconnectTimeout = setTimeout(connect, 5000 * reconnectAttempts);
-      };
-    }
-
-    connect();
+      }
+    };
 
     return () => {
       stopped = true;
-      clearTimeout(reconnectTimeout);
       es?.close();
+      eventSourceRef.current = null;
     };
   }, []);
 }

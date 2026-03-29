@@ -10,6 +10,7 @@ from app.api.routes import router
 from app.config import get_settings
 from app.db import init_db
 from app.scheduler import build_scheduler
+from app.services.events import listener_count
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ app.include_router(router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
-def healthcheck() -> dict[str, str | bool | None]:
+def healthcheck() -> dict[str, str | bool | int | None]:
     startup_error = getattr(app.state, "startup_error", None)
     runtime_ready = getattr(app.state, "runtime_ready", False)
     db_ready = getattr(app.state, "db_ready", False)
@@ -99,5 +100,6 @@ def healthcheck() -> dict[str, str | bool | None]:
         "ready": runtime_ready,
         "db_ready": db_ready,
         "scheduler_enabled": settings.enable_scheduler,
+        "event_listener_count": listener_count(),
         "startup_error": startup_error,
     }

@@ -47,15 +47,17 @@ FILING_FORM_BASE_SCORES = {
 
 
 def company_market_cap_percentiles(session: Session) -> dict[int, float]:
-    companies = session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-    ranked = [company for company in companies if company.market_cap]
-    ranked.sort(key=lambda company: company.market_cap or 0)
+    rows = session.execute(
+        select(Company.id, Company.market_cap).where(Company.is_active.is_(True))
+    ).all()
+    ranked = [(int(company_id), int(market_cap)) for company_id, market_cap in rows if market_cap]
+    ranked.sort(key=lambda item: item[1])
     if not ranked:
         return {}
     if len(ranked) == 1:
-        return {ranked[0].id: 100.0}
+        return {ranked[0][0]: 100.0}
     total = len(ranked) - 1
-    return {company.id: (index / total) * 100.0 for index, company in enumerate(ranked)}
+    return {company_id: (index / total) * 100.0 for index, (company_id, _) in enumerate(ranked)}
 
 
 def novelty_score(current_text: str | None, prior_text: str | None) -> float:

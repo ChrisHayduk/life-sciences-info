@@ -290,3 +290,11 @@ def test_run_resummarize_item_uses_service_level_manual_summary(db_session, monk
 
     assert result == 55
     assert FakeFilingService.called == (55, False, True)
+
+
+def test_run_ensure_db_indexes_reports_created_indexes(monkeypatch):
+    monkeypatch.setattr("app.jobs.ensure_db_indexes", lambda: ["ix_one", "ix_two"])
+
+    result = jobs.run_ensure_db_indexes()
+
+    assert result == {"count": 2, "indexes": ["ix_one", "ix_two"]}

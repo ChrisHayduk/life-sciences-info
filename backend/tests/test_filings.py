@@ -357,3 +357,28 @@ def test_filing_list_item_uses_rule_based_fallback_summary_when_ai_summary_is_mi
 
     assert item.summary
     assert "Guidance increased after strong quarterly results." in item.summary
+
+
+def test_pending_queue_counts_uses_narrow_projection(db_session, monkeypatch):
+    monkeypatch.setattr("app.services.filings.watchlist_company_ids", lambda session: set())
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        def all(self):
+            return []
+
+    def fake_execute(statement, *args, **kwargs):
+        captured["sql"] = str(statement)
+        return FakeResult()
+
+    monkeypatch.setattr(db_session, "execute", fake_execute)
+
+    counts = FilingService(db_session).pending_queue_counts()
+    sql = captured["sql"].upper()
+
+    assert counts == {"filings_pending": 0, "filings_pending_full_ai": 0, "filings_pending_short_ai": 0}
+    assert "FILINGS.RAW_TEXT" not in sql
+    assert "FILINGS.PARSED_SECTIONS" not in sql
+    assert "FILINGS.SUMMARY_JSON" not in sql
+    assert "FILINGS.DIFF_JSON" not in sql
+    assert "JOIN COMPANIES" not in sql

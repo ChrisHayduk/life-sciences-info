@@ -56,6 +56,38 @@ def init_db() -> None:
     _ensure_compatible_schema()
 
 
+def ensure_db_indexes() -> list[str]:
+    if engine.dialect.name != "postgresql":
+        return []
+
+    statements = {
+        "ix_filings_summary_queue_active": """
+            CREATE INDEX IF NOT EXISTS ix_filings_summary_queue_active
+            ON filings (filed_at DESC, company_id, normalized_form_type, event_type)
+            WHERE summary_status IN ('pending', 'failed', 'stale') AND summary_attempts < 3
+        """,
+        "ix_news_items_summary_queue_active": """
+            CREATE INDEX IF NOT EXISTS ix_news_items_summary_queue_active
+            ON news_items (published_at DESC, is_official_source, event_type, source_weight)
+            WHERE summary_status IN ('pending', 'failed', 'stale') AND summary_attempts < 3
+        """,
+        "ix_news_items_dedupe_sort": """
+            CREATE INDEX IF NOT EXISTS ix_news_items_dedupe_sort
+            ON news_items (dedupe_group_id, is_official_source DESC, composite_score DESC, published_at DESC, id DESC)
+        """,
+        "ix_news_items_company_tag_ids_gin": """
+            CREATE INDEX IF NOT EXISTS ix_news_items_company_tag_ids_gin
+            ON news_items USING GIN ((company_tag_ids::jsonb))
+        """,
+    }
+    created: list[str] = []
+    with engine.begin() as connection:
+        for name, statement in statements.items():
+            connection.execute(text(statement))
+            created.append(name)
+    return created
+
+
 def _ensure_compatible_schema() -> None:
     from app import models  # noqa: F401
 

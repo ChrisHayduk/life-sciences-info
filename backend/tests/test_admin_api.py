@@ -97,6 +97,19 @@ def test_admin_poll_trials_route_supports_focus_tickers(client, monkeypatch):
     assert "5 new trials" in response.json()["message"]
 
 
+def test_admin_ensure_db_indexes_route(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.api.routes.run_ensure_db_indexes",
+        lambda: {"count": 2, "indexes": ["ix_one", "ix_two"]},
+    )
+
+    response = client.post("/api/v1/admin/ensure-db-indexes")
+
+    assert response.status_code == 200
+    assert "Ensured 2 database indexes." in response.json()["message"]
+    assert "ix_one, ix_two" in response.json()["message"]
+
+
 def test_events_stream_returns_cors_headers_for_frontend_origin(monkeypatch):
     monkeypatch.setenv("FRONTEND_BASE_URL", "https://life-sciences-info.vercel.app")
     monkeypatch.setenv("CORS_ORIGINS", "")

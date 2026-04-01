@@ -404,3 +404,26 @@ def test_news_summarize_item_consumes_override_budget(db_session, company, monke
         assert str(exc) == "override_budget_exhausted"
     finally:
         get_settings.cache_clear()
+
+
+def test_news_pending_queue_counts_uses_narrow_projection(db_session, monkeypatch):
+    monkeypatch.setattr("app.services.news._watchlist_company_ids", lambda session: set())
+    captured: dict[str, str] = {}
+
+    class FakeResult:
+        def all(self):
+            return []
+
+    def fake_execute(statement, *args, **kwargs):
+        captured["sql"] = str(statement)
+        return FakeResult()
+
+    monkeypatch.setattr(db_session, "execute", fake_execute)
+
+    counts = NewsService(db_session).pending_queue_counts()
+    sql = captured["sql"].upper()
+
+    assert counts == {"news_pending": 0, "news_pending_full_ai": 0, "news_pending_short_ai": 0}
+    assert "NEWS_ITEMS.CONTENT_TEXT" not in sql
+    assert "NEWS_ITEMS.SUMMARY_JSON" not in sql
+    assert "NEWS_ITEMS.EXCERPT" not in sql

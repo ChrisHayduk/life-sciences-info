@@ -13,6 +13,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.jobs import (
     run_build_daily_digest,
+    run_ensure_db_indexes,
     run_ingest_news,
     run_poll_regulatory_events,
     run_poll_sec_filings,
@@ -556,6 +557,18 @@ def admin_retag_news_companies(
         message=(
             f"Retagged company links for {result['updated']} of {result['scanned']} news items; "
             f"{result['reranked']} reranked."
+        ),
+    )
+
+
+@router.post("/admin/ensure-db-indexes", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_ensure_db_indexes() -> AdminActionResponse:
+    result = run_ensure_db_indexes()
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Ensured {result['count']} database indexes."
+            + (f" {', '.join(result['indexes'])}" if result["indexes"] else "")
         ),
     )
 

@@ -5,14 +5,15 @@ import hashlib
 import re
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from bs4 import BeautifulSoup
 from bs4.element import Comment
 from dateutil import parser as date_parser
 from dateutil.relativedelta import relativedelta
-from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session, defer
+from sqlalchemy import case, func, inspect, select
+from sqlalchemy.orm import Load, Session, defer, load_only
 
 from app.config import get_settings
 from app.models import Company, Filing, FilingNewsLink, NewsItem, Watchlist
@@ -29,12 +30,15 @@ from app.services.html_pdf import render_html_to_pdf
 from app.services.market_data import MarketDataClient
 from app.services.pdf import build_pdf_from_text
 from app.services.ranking import (
+    FILING_FORM_BASE_SCORES,
     company_market_cap_percentiles,
     compute_filing_scores,
     compute_pending_filing_scores,
     filing_priority_reason,
     freshness_bucket,
+    material_event_score,
     personal_relevance_score,
+    recency_score,
     summary_priority_score,
 )
 from app.services.sec import SECClient
@@ -74,6 +78,10 @@ COMPANY_FILING_TYPE_PRIORITY = {
     "8-K": 4,
     "6-K": 5,
 }
+SUMMARY_PENDING_STATUSES = ["pending", "failed", "stale"]
+FILING_SUMMARY_STAGE_ONE_CANDIDATE_MULTIPLIER = 40
+FILING_SUMMARY_STAGE_TWO_CANDIDATE_MULTIPLIER = 10
+FILING_BATCH_SIZE = 100
 ITEM_HEADER_RE = re.compile(r"(?im)^\s*(?:part\s+[ivx]+\s*)?item\s+\d+[a-z]?\.")
 URL_ONLY_RE = re.compile(r"^(?:https?://\S+\s*)+$", re.IGNORECASE)
 NAMESPACE_TOKEN_RE = re.compile(r"^[a-z][\w.-]*:[\w.-]+$", re.IGNORECASE)
@@ -258,6 +266,62 @@ def watchlist_company_ids(session: Session) -> set[int]:
     for watchlist in watchlists:
         ids.update(int(company_id) for company_id in (watchlist.company_ids or []))
     return ids
+
+
+def _list_item_filing_columns():
+    return (
+        Filing.id,
+        Filing.company_id,
+        Filing.accession_number,
+        Filing.form_type,
+        Filing.normalized_form_type,
+        Filing.filed_at,
+        Filing.title,
+        Filing.description,
+        Filing.importance_score,
+        Filing.market_cap_score,
+        Filing.impact_score,
+        Filing.composite_score,
+        Filing.score_explanation,
+        Filing.summary_json,
+        Filing.summary_status,
+        Filing.summary_tier,
+        Filing.source_type,
+        Filing.event_type,
+        Filing.priority_reason,
+        Filing.is_official_source,
+        Filing.dedupe_group_id,
+        Filing.freshness_bucket,
+        Filing.original_document_url,
+        Filing.pdf_artifact_key,
+        Filing.item_numbers,
+    )
+
+
+def _list_item_company_columns():
+    return (
+        Company.id,
+        Company.name,
+        Company.ticker,
+    )
+
+
+def _release_instances(
+    session: Session,
+    instances: Iterable[object],
+    *,
+    preserved_identity_keys: set[object],
+) -> None:
+    for instance in instances:
+        identity_key = None
+        with contextlib.suppress(Exception):
+            identity_key = inspect(instance).key
+        if identity_key in preserved_identity_keys:
+            with contextlib.suppress(Exception):
+                session.expire(instance)
+            continue
+        with contextlib.suppress(Exception):
+            session.expunge(instance)
 
 
 def _strip_html_noise(soup: BeautifulSoup) -> None:
@@ -581,7 +645,7 @@ class FilingService:
             updated += int(self.reprocess_existing_filing(filing_id, commit=True, resummarize=should_summarize))
             if should_summarize:
                 summaries_done += 1
-            self.session.expunge_all()
+            self.session.expire_all()
         return updated
 
     def reprocess_existing_filing(self, filing_id: int, *, commit: bool = True, resummarize: bool = True) -> bool:
@@ -771,23 +835,70 @@ class FilingService:
                 "remaining_daily_budget_usd": round(budget_service.remaining_usd("filing"), 4) if self.settings.openai_api_key else 0.0,
             }
 
+        market_caps = company_market_cap_percentiles(self.session)
+        watchlist_ids = watchlist_company_ids(self.session)
+        cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
+        metadata_candidates = self.session.execute(
+            select(
+                Filing.id,
+                Filing.company_id,
+                Filing.filed_at,
+                Filing.normalized_form_type,
+                Filing.event_type,
+                Filing.title,
+                Filing.description,
+                Filing.item_numbers,
+                Filing.extra_metadata,
+            )
+            .where(
+                Filing.summary_status.in_(SUMMARY_PENDING_STATUSES),
+                Filing.summary_attempts < 3,
+                Filing.filed_at >= cutoff,
+            )
+            .order_by(Filing.filed_at.desc(), Filing.id.desc())
+            .limit(max(200, effective_limit * FILING_SUMMARY_STAGE_ONE_CANDIDATE_MULTIPLIER))
+        ).all()
+        filtered_candidates = [
+            row
+            for row in metadata_candidates
+            if include_historical or (row.extra_metadata or {}).get("ingest_origin") == "sec_poll"
+        ]
+        top_candidate_ids = [
+            row.id
+            for row in sorted(
+                filtered_candidates,
+                key=lambda row: self._pending_candidate_priority(
+                    row,
+                    company_market_cap_score=market_caps.get(int(row.company_id), 0.0),
+                    watchlist_match=int(row.company_id) in watchlist_ids,
+                ),
+                reverse=True,
+            )[: max(50, effective_limit * FILING_SUMMARY_STAGE_TWO_CANDIDATE_MULTIPLIER)]
+        ]
+        if not top_candidate_ids:
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": remaining_daily,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("filing"), 4) if self.settings.openai_api_key else 0.0,
+            }
+
         raw_candidates = self.session.execute(
             select(Filing, Company)
             .join(Company, Filing.company_id == Company.id)
-            .where(Filing.summary_status.in_(["pending", "failed", "stale"]), Filing.summary_attempts < 3)
-            .options(defer(Filing.parsed_sections), defer(Filing.diff_json))
-            .limit(100)
+            .where(Filing.id.in_(top_candidate_ids))
+            .options(defer(Filing.diff_json))
         ).all()
-        market_caps = company_market_cap_percentiles(self.session)
-        watchlist_ids = watchlist_company_ids(self.session)
+        candidate_order = {filing_id: index for index, filing_id in enumerate(top_candidate_ids)}
         candidates = sorted(
             raw_candidates,
-            key=lambda row: summary_priority_score(row[0], market_caps.get(row[1].id, 0.0))
-            + (20.0 if row[1].id in watchlist_ids else 0.0),
+            key=lambda row: (
+                summary_priority_score(row[0], market_caps.get(row[1].id, 0.0))
+                + (20.0 if row[1].id in watchlist_ids else 0.0),
+                -candidate_order.get(row[0].id, len(candidate_order)),
+            ),
             reverse=True,
         )
 
-        cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
         summarized = 0
         for filing, company in candidates:
             ingest_origin = (filing.extra_metadata or {}).get("ingest_origin")
@@ -882,34 +993,50 @@ class FilingService:
         if company_ids is not None and not target_ids:
             return 0
 
-        company_query = select(Company).where(Company.is_active.is_(True))
+        self.session.flush()
+        company_query = select(Company.id, Company.market_cap).where(Company.is_active.is_(True))
         if target_ids:
             company_query = company_query.where(Company.id.in_(target_ids))
-        companies = self.session.scalars(company_query).all()
-        if not companies:
+        company_rows = self.session.execute(company_query.order_by(Company.id.asc())).all()
+        if not company_rows:
             return 0
 
-        companies_by_id = {company.id: company for company in companies}
-        filing_query = select(Filing).order_by(Filing.company_id.asc(), Filing.filed_at.asc(), Filing.id.asc())
-        if target_ids:
-            filing_query = filing_query.where(Filing.company_id.in_(target_ids))
-        filings = self.session.scalars(filing_query).all()
         market_cap_scores = company_market_cap_percentiles(self.session)
-
-        prior_by_group: dict[tuple[int, str], Filing] = {}
         updated = 0
-        for filing in filings:
-            company = companies_by_id.get(filing.company_id)
-            if not company:
-                continue
-            group = comparable_group(filing.normalized_form_type)
-            prior = prior_by_group.get((filing.company_id, group))
-            filing.prior_comparable_filing_id = prior.id if prior else None
-            self._apply_scores(filing, company, prior_filing=prior, market_cap_scores=market_cap_scores)
-            prior_by_group[(filing.company_id, group)] = filing
-            updated += 1
-
-        self.session.commit()
+        preserved_identity_keys = set(self.session.identity_map.keys())
+        for company_id, market_cap in company_rows:
+            company = SimpleNamespace(id=int(company_id), market_cap=market_cap)
+            filings = self.session.scalars(
+                select(Filing)
+                .where(Filing.company_id == company.id)
+                .order_by(Filing.filed_at.asc(), Filing.id.asc())
+                .options(
+                    load_only(
+                        Filing.id,
+                        Filing.company_id,
+                        Filing.normalized_form_type,
+                        Filing.filed_at,
+                        Filing.summary_status,
+                        Filing.summary_json,
+                        Filing.raw_text,
+                        Filing.event_type,
+                        Filing.item_numbers,
+                        Filing.score_explanation,
+                        Filing.description,
+                        Filing.title,
+                    )
+                )
+            ).all()
+            prior_by_group: dict[str, Filing] = {}
+            for filing in filings:
+                group = comparable_group(filing.normalized_form_type)
+                prior = prior_by_group.get(group)
+                filing.prior_comparable_filing_id = prior.id if prior else None
+                self._apply_scores(filing, company, prior_filing=prior, market_cap_scores=market_cap_scores)
+                prior_by_group[group] = filing
+                updated += 1
+            self.session.commit()
+            _release_instances(self.session, filings, preserved_identity_keys=preserved_identity_keys)
         return updated
 
     def _store_filing_artifacts(
@@ -1114,15 +1241,17 @@ class FilingService:
 
     def _prior_comparable_filing(self, company_id: int, filing: Filing) -> Filing | None:
         group = comparable_group(filing.normalized_form_type)
-        filings = self.session.scalars(
+        comparable_forms = {"10-K", "20-F", "40-F"} if group == "annual" else {"10-Q", "6-K", "8-K"}
+        return self.session.scalar(
             select(Filing)
-            .where(Filing.company_id == company_id, Filing.filed_at < filing.filed_at)
-            .order_by(Filing.filed_at.desc())
-        ).all()
-        for candidate in filings:
-            if comparable_group(candidate.normalized_form_type) == group:
-                return candidate
-        return None
+            .where(
+                Filing.company_id == company_id,
+                Filing.filed_at < filing.filed_at,
+                Filing.normalized_form_type.in_(sorted(comparable_forms)),
+            )
+            .order_by(Filing.filed_at.desc(), Filing.id.desc())
+            .limit(1)
+        )
 
     def _summary_source_text(self, filing: Filing, *, summary_tier: str = "full_ai") -> str:
         section_text = []
@@ -1165,7 +1294,10 @@ class FilingService:
         query = (
             select(Filing, Company)
             .join(Company, Filing.company_id == Company.id)
-            .options(defer(Filing.raw_text), defer(Filing.diff_json))
+            .options(
+                Load(Filing).load_only(*_list_item_filing_columns()),
+                Load(Company).load_only(*_list_item_company_columns()),
+            )
         )
         watchlist_company_match: set[int] = set()
         if watchlist_id is not None:
@@ -1204,7 +1336,7 @@ class FilingService:
                 ),
                 reverse=True,
             )
-        return [self._to_list_item(filing, company) for filing, company in rows]
+        return [self._to_list_item(filing, company, include_section_fallback=False) for filing, company in rows]
 
     def list_filings_paginated(
         self,
@@ -1221,7 +1353,10 @@ class FilingService:
         query = (
             select(Filing, Company)
             .join(Company, Filing.company_id == Company.id)
-            .options(defer(Filing.raw_text), defer(Filing.diff_json))
+            .options(
+                Load(Filing).load_only(*_list_item_filing_columns()),
+                Load(Company).load_only(*_list_item_company_columns()),
+            )
         )
         count_query = select(func.count()).select_from(Filing).join(Company, Filing.company_id == Company.id)
         watchlist_company_match: set[int] = set()
@@ -1272,18 +1407,55 @@ class FilingService:
                 ),
                 reverse=True,
             )
-        items = [self._to_list_item(filing, company) for filing, company in rows]
+        items = [self._to_list_item(filing, company, include_section_fallback=False) for filing, company in rows]
         return {"items": items, "total": total, "offset": offset, "limit": limit}
 
     def get_filing_detail(self, filing_id: int) -> FilingDetail | None:
         row = self.session.execute(
-            select(Filing, Company).join(Company, Filing.company_id == Company.id).where(Filing.id == filing_id)
+            select(Filing, Company)
+            .join(Company, Filing.company_id == Company.id)
+            .where(Filing.id == filing_id)
+            .options(
+                defer(Filing.raw_text),
+                Load(Filing).load_only(
+                    Filing.id,
+                    Filing.company_id,
+                    Filing.prior_comparable_filing_id,
+                    Filing.accession_number,
+                    Filing.form_type,
+                    Filing.normalized_form_type,
+                    Filing.title,
+                    Filing.description,
+                    Filing.filed_at,
+                    Filing.importance_score,
+                    Filing.market_cap_score,
+                    Filing.impact_score,
+                    Filing.composite_score,
+                    Filing.score_explanation,
+                    Filing.summary_json,
+                    Filing.summary_status,
+                    Filing.summary_tier,
+                    Filing.source_type,
+                    Filing.event_type,
+                    Filing.priority_reason,
+                    Filing.is_official_source,
+                    Filing.dedupe_group_id,
+                    Filing.freshness_bucket,
+                    Filing.original_document_url,
+                    Filing.pdf_artifact_key,
+                    Filing.item_numbers,
+                    Filing.parsed_sections,
+                    Filing.diff_json,
+                    Filing.diff_status,
+                ),
+                Load(Company).load_only(*_list_item_company_columns()),
+            )
         ).first()
         if not row:
             return None
         filing, company = row
         summary = filing.summary_json or {}
-        base = self._to_list_item(filing, company)
+        base = self._to_list_item(filing, company, include_section_fallback=True)
 
         # Fetch related news via FilingNewsLink
         from app.services.news import NewsService
@@ -1317,9 +1489,12 @@ class FilingService:
             related_news=related_news,
         )
 
-    def _to_list_item(self, filing: Filing, company: Company) -> FilingListItem:
+    def _to_list_item(self, filing: Filing, company: Company, *, include_section_fallback: bool = True) -> FilingListItem:
         summary = filing.summary_json or {}
-        summary_text = summary.get("summary") or self._fallback_summary(filing)
+        summary_text = summary.get("summary") or self._fallback_summary(
+            filing,
+            include_sections=include_section_fallback,
+        )
         return FilingListItem(
             id=filing.id,
             company_id=company.id,
@@ -1352,7 +1527,7 @@ class FilingService:
             ),
         )
 
-    def _fallback_summary(self, filing: Filing) -> str:
+    def _fallback_summary(self, filing: Filing, *, include_sections: bool = True) -> str:
         if filing.title and filing.normalized_form_type == "8-K":
             return filing.title
         if filing.event_type and filing.title and filing.normalized_form_type in {"8-K", "6-K"}:
@@ -1360,22 +1535,23 @@ class FilingService:
         if filing.item_numbers and filing.normalized_form_type == "8-K":
             items = ", ".join(filing.item_numbers[:3])
             return f"Current event filing covering item {items}."
-        for section_name in ("md&a", "business", "risk_factors", "legal_proceedings", "financial_statements"):
-            section_text = (filing.parsed_sections or {}).get(section_name)
-            if not section_text:
-                continue
-            section_lines = [line.strip() for line in section_text.splitlines() if line.strip()]
-            snippet = ""
-            for line in section_lines:
-                if len(line.split()) <= 8 and _looks_like_heading(line):
+        if include_sections:
+            for section_name in ("md&a", "business", "risk_factors", "legal_proceedings", "financial_statements"):
+                section_text = (filing.parsed_sections or {}).get(section_name)
+                if not section_text:
                     continue
-                snippet = line
-                break
-            if not snippet and section_lines:
-                snippet = section_lines[0]
-            if len(snippet) > 240:
-                snippet = snippet[:237].rsplit(" ", 1)[0] + "..."
-            return snippet
+                section_lines = [line.strip() for line in section_text.splitlines() if line.strip()]
+                snippet = ""
+                for line in section_lines:
+                    if len(line.split()) <= 8 and _looks_like_heading(line):
+                        continue
+                    snippet = line
+                    break
+                if not snippet and section_lines:
+                    snippet = section_lines[0]
+                if len(snippet) > 240:
+                    snippet = snippet[:237].rsplit(" ", 1)[0] + "..."
+                return snippet
         description = filing.description or filing.title or ""
         return description[:240]
 
@@ -1388,12 +1564,50 @@ class FilingService:
         )
 
     @staticmethod
+    def _pending_candidate_priority(row, *, company_market_cap_score: float, watchlist_match: bool) -> float:
+        form_base = FILING_FORM_BASE_SCORES.get(row.normalized_form_type, 50.0)
+        material_text = " ".join(
+            filter(
+                None,
+                [
+                    row.title,
+                    row.description,
+                    row.event_type,
+                    " ".join(row.item_numbers or []),
+                ],
+            )
+        )
+        return round(
+            (0.30 * form_base)
+            + (0.30 * material_event_score(material_text))
+            + (0.20 * company_market_cap_score)
+            + (0.20 * recency_score(row.filed_at))
+            + (20.0 if watchlist_match else 0.0),
+            2,
+        )
+
+    @staticmethod
     def _summary_tier_for_filing(filing: Filing, *, automated: bool, watchlist_match: bool) -> str:
+        return FilingService._summary_tier_for_filing_metadata(
+            normalized_form_type=filing.normalized_form_type,
+            event_type=filing.event_type,
+            automated=automated,
+            watchlist_match=watchlist_match,
+        )
+
+    @staticmethod
+    def _summary_tier_for_filing_metadata(
+        *,
+        normalized_form_type: str,
+        event_type: str | None,
+        automated: bool,
+        watchlist_match: bool,
+    ) -> str:
         if not automated:
             return "full_ai"
-        if filing.normalized_form_type in {"10-K", "20-F", "40-F", "8-K"}:
+        if normalized_form_type in {"10-K", "20-F", "40-F", "8-K"}:
             return "full_ai"
-        if watchlist_match or filing.event_type in {"results-of-operations", "regulatory"}:
+        if watchlist_match or event_type in {"results-of-operations", "regulatory"}:
             return "full_ai"
         return "short_ai"
 
@@ -1406,23 +1620,32 @@ class FilingService:
         watchlist_ids = watchlist_company_ids(self.session)
         cutoff = datetime.now(UTC) - timedelta(days=self.settings.filing_summary_backlog_days)
         counts = {"filings_pending": 0, "filings_pending_full_ai": 0, "filings_pending_short_ai": 0}
-        rows = self.session.execute(
-            select(Filing, Company)
-            .join(Company, Filing.company_id == Company.id)
-            .where(Filing.summary_status.in_(["pending", "failed", "stale"]), Filing.summary_attempts < 3)
-        ).all()
-        for filing, company in rows:
-            ingest_origin = (filing.extra_metadata or {}).get("ingest_origin")
-            if not include_historical and ingest_origin != "sec_poll":
-                continue
-            filed_at = filing.filed_at if filing.filed_at.tzinfo else filing.filed_at.replace(tzinfo=UTC)
+        query = (
+            select(
+                Filing.company_id,
+                Filing.filed_at,
+                Filing.normalized_form_type,
+                Filing.event_type,
+            )
+            .where(
+                Filing.summary_status.in_(SUMMARY_PENDING_STATUSES),
+                Filing.summary_attempts < 3,
+                Filing.filed_at >= cutoff,
+            )
+        )
+        if not include_historical:
+            query = query.where(Filing.extra_metadata["ingest_origin"].as_string() == "sec_poll")
+        rows = self.session.execute(query).all()
+        for row in rows:
+            filed_at = row.filed_at if row.filed_at.tzinfo else row.filed_at.replace(tzinfo=UTC)
             if filed_at < cutoff:
                 continue
             counts["filings_pending"] += 1
-            tier = self._summary_tier_for_filing(
-                filing,
+            tier = self._summary_tier_for_filing_metadata(
+                normalized_form_type=row.normalized_form_type,
+                event_type=row.event_type,
                 automated=True,
-                watchlist_match=company.id in watchlist_ids,
+                watchlist_match=int(row.company_id) in watchlist_ids,
             )
             counts[f"filings_pending_{tier}"] += 1
         return counts

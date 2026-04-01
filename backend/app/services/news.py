@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
+from types import SimpleNamespace
 from typing import Iterable
 from urllib.parse import urljoin, urlparse, urlunparse
 
@@ -13,19 +14,22 @@ import feedparser
 import httpx
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from sqlalchemy import select
-from sqlalchemy.orm import Session, defer
+from sqlalchemy import String, and_, case, cast, func, inspect, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Session, defer, load_only
 
 from app.config import get_settings
 from app.models import Company, NewsItem, Watchlist
 from app.schemas import NewsItemResponse
 from app.services.constants import COMPANY_IR_FEEDS, COMPANY_IR_SOURCES, NEWS_FEEDS
 from app.services.ranking import (
+    HIGH_SIGNAL_EVENT_TYPES,
     company_market_cap_percentiles,
     compute_news_scores,
     compute_pending_news_scores,
     freshness_bucket,
     news_priority_reason,
+    recency_score,
     news_summary_priority_score,
     personal_relevance_score,
 )
@@ -48,6 +52,56 @@ HIGH_SIGNAL_NEWS_KEYWORDS: dict[str, tuple[str, ...]] = {
     "leadership-change": ("ceo", "cfo", "chief executive", "board", "chair", "appointed"),
     "manufacturing": ("manufacturing", "plant", "facility", "supply"),
 }
+SUMMARY_PENDING_STATUSES = ["pending", "failed", "stale"]
+NEWS_SUMMARY_STAGE_ONE_CANDIDATE_MULTIPLIER = 40
+NEWS_SUMMARY_STAGE_TWO_CANDIDATE_MULTIPLIER = 10
+NEWS_BATCH_SIZE = 100
+
+
+def _list_item_news_columns():
+    return (
+        NewsItem.id,
+        NewsItem.source_name,
+        NewsItem.source_weight,
+        NewsItem.title,
+        NewsItem.canonical_url,
+        NewsItem.excerpt,
+        NewsItem.published_at,
+        NewsItem.mentioned_companies,
+        NewsItem.company_tag_ids,
+        NewsItem.topic_tags,
+        NewsItem.summary_json,
+        NewsItem.summary_status,
+        NewsItem.summary_tier,
+        NewsItem.source_type,
+        NewsItem.event_type,
+        NewsItem.priority_reason,
+        NewsItem.is_official_source,
+        NewsItem.dedupe_group_id,
+        NewsItem.freshness_bucket,
+        NewsItem.importance_score,
+        NewsItem.market_cap_score,
+        NewsItem.composite_score,
+        NewsItem.score_explanation,
+    )
+
+
+def _release_instances(
+    session: Session,
+    instances: Iterable[object],
+    *,
+    preserved_identity_keys: set[object],
+) -> None:
+    for instance in instances:
+        identity_key = None
+        with contextlib.suppress(Exception):
+            identity_key = inspect(instance).key
+        if identity_key in preserved_identity_keys:
+            with contextlib.suppress(Exception):
+                session.expire(instance)
+            continue
+        with contextlib.suppress(Exception):
+            session.expunge(instance)
 
 
 def _normalize_url(url: str) -> str:
@@ -285,18 +339,59 @@ class NewsService:
         market_caps = company_market_cap_percentiles(self.session)
         watchlist_company_ids = _watchlist_company_ids(self.session)
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.settings.news_summary_backlog_days)
+        metadata_candidates = self.session.execute(
+            select(
+                NewsItem.id,
+                NewsItem.published_at,
+                NewsItem.source_weight,
+                NewsItem.title,
+                NewsItem.excerpt,
+                NewsItem.event_type,
+                NewsItem.is_official_source,
+                NewsItem.company_tag_ids,
+            )
+            .where(
+                NewsItem.summary_status.in_(SUMMARY_PENDING_STATUSES),
+                NewsItem.summary_attempts < 3,
+                NewsItem.published_at >= cutoff,
+            )
+            .order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
+            .limit(max(200, effective_limit * NEWS_SUMMARY_STAGE_ONE_CANDIDATE_MULTIPLIER))
+        ).all()
+        top_candidate_ids = [
+            row.id
+            for row in sorted(
+                metadata_candidates,
+                key=lambda row: self._pending_candidate_priority(
+                    row,
+                    watchlist_company_ids=watchlist_company_ids,
+                    market_caps=market_caps,
+                ),
+                reverse=True,
+            )[: max(50, effective_limit * NEWS_SUMMARY_STAGE_TWO_CANDIDATE_MULTIPLIER)]
+        ]
+        if not top_candidate_ids:
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": remaining_daily,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("news"), 4) if self.settings.openai_api_key else 0.0,
+            }
+
         raw_candidates = self.session.scalars(
             select(NewsItem)
-            .where(NewsItem.summary_status.in_(["pending", "failed", "stale"]), NewsItem.summary_attempts < 3)
-            .options(defer(NewsItem.summary_json), defer(NewsItem.score_explanation))
-            .limit(100)
+            .where(NewsItem.id.in_(top_candidate_ids))
+            .options(defer(NewsItem.score_explanation))
         ).all()
+        candidate_order = {news_id: index for index, news_id in enumerate(top_candidate_ids)}
         candidates = sorted(
             raw_candidates,
-            key=lambda item: news_summary_priority_score(
-                item,
-                max((market_caps.get(cid, 0.0) for cid in (item.company_tag_ids or [])), default=0.0),
-            ) + (20.0 if set(item.company_tag_ids or []).intersection(watchlist_company_ids) else 0.0),
+            key=lambda item: (
+                news_summary_priority_score(
+                    item,
+                    max((market_caps.get(cid, 0.0) for cid in (item.company_tag_ids or [])), default=0.0),
+                ) + (20.0 if set(item.company_tag_ids or []).intersection(watchlist_company_ids) else 0.0),
+                -candidate_order.get(item.id, len(candidate_order)),
+            ),
             reverse=True,
         )
 
@@ -409,7 +504,7 @@ class NewsService:
         return self.list_news_for_company(company, limit=limit)
 
     def count_news_for_company(self, company: Company) -> int:
-        return len(self._news_items_for_company(company, sort_mode="personal"))
+        return self._count_news_for_company(company)
 
     def retag_company_news(
         self,
@@ -431,56 +526,95 @@ class NewsService:
         company_aliases = self._company_aliases(companies)
         market_caps = company_market_cap_percentiles(self.session)
 
-        query = select(NewsItem).order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
+        query = (
+            select(NewsItem.id)
+            .order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
+        )
         if recent_days is not None:
             cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
             query = query.where(NewsItem.published_at >= cutoff)
-        news_items = self.session.scalars(query).all()
+        news_item_ids = self.session.scalars(query).all()
 
         scanned = 0
         updated = 0
         reranked = 0
-        for news_item in news_items:
-            text = f"{news_item.title or ''}\n{news_item.content_text or news_item.excerpt or ''}"
-            mentioned, company_tag_ids = self._detect_companies(text, company_aliases)
-            if focus_set and not (
-                focus_company_ids.intersection(company_tag_ids) or focus_company_ids.intersection(set(news_item.company_tag_ids or []))
-            ):
-                continue
+        preserved_identity_keys = set(self.session.identity_map.keys())
+        for start in range(0, len(news_item_ids), NEWS_BATCH_SIZE):
+            batch_ids = news_item_ids[start : start + NEWS_BATCH_SIZE]
+            batch_items = self.session.scalars(
+                select(NewsItem)
+                .where(NewsItem.id.in_(batch_ids))
+                .options(
+                    load_only(
+                        NewsItem.id,
+                        NewsItem.title,
+                        NewsItem.excerpt,
+                        NewsItem.content_text,
+                        NewsItem.published_at,
+                        NewsItem.mentioned_companies,
+                        NewsItem.company_tag_ids,
+                        NewsItem.topic_tags,
+                        NewsItem.summary_json,
+                        NewsItem.summary_status,
+                        NewsItem.source_name,
+                        NewsItem.canonical_url,
+                        NewsItem.source_weight,
+                        NewsItem.source_type,
+                        NewsItem.is_official_source,
+                        NewsItem.event_type,
+                        NewsItem.dedupe_group_id,
+                        NewsItem.freshness_bucket,
+                    )
+                )
+            ).all()
+            items_by_id = {item.id: item for item in batch_items}
+            for news_id in batch_ids:
+                news_item = items_by_id.get(news_id)
+                if news_item is None:
+                    continue
+                text = f"{news_item.title or ''}\n{news_item.content_text or news_item.excerpt or ''}"
+                mentioned, company_tag_ids = self._detect_companies(text, company_aliases)
+                if focus_set and not (
+                    focus_company_ids.intersection(company_tag_ids) or focus_company_ids.intersection(set(news_item.company_tag_ids or []))
+                ):
+                    continue
+                if limit is not None and scanned >= limit:
+                    break
+                scanned += 1
+
+                existing_mentions = news_item.mentioned_companies or []
+                existing_company_tags = news_item.company_tag_ids or []
+                if mentioned != existing_mentions or company_tag_ids != existing_company_tags:
+                    news_item.mentioned_companies = mentioned
+                    news_item.company_tag_ids = company_tag_ids
+                    updated += 1
+
+                source_type, is_official_source = _classify_news_source(
+                    news_item.source_name,
+                    news_item.canonical_url,
+                )
+                news_item.source_type = source_type
+                news_item.is_official_source = is_official_source
+                news_item.event_type = _infer_news_event_type(
+                    news_item.title or "",
+                    news_item.content_text or news_item.excerpt or "",
+                    news_item.topic_tags or [],
+                )
+                news_item.dedupe_group_id = _build_news_dedupe_group_id(
+                    company_tag_ids=company_tag_ids,
+                    event_type=news_item.event_type,
+                    title=news_item.title,
+                    published_at=news_item.published_at,
+                )
+                news_item.freshness_bucket = freshness_bucket(news_item.published_at)
+
+                self._apply_scores(news_item, companies, market_caps=market_caps)
+                reranked += 1
+            self.session.commit()
+            _release_instances(self.session, batch_items, preserved_identity_keys=preserved_identity_keys)
             if limit is not None and scanned >= limit:
                 break
-            scanned += 1
 
-            existing_mentions = news_item.mentioned_companies or []
-            existing_company_tags = news_item.company_tag_ids or []
-            if mentioned != existing_mentions or company_tag_ids != existing_company_tags:
-                news_item.mentioned_companies = mentioned
-                news_item.company_tag_ids = company_tag_ids
-                updated += 1
-
-            source_type, is_official_source = _classify_news_source(
-                news_item.source_name,
-                news_item.canonical_url,
-            )
-            news_item.source_type = source_type
-            news_item.is_official_source = is_official_source
-            news_item.event_type = _infer_news_event_type(
-                news_item.title or "",
-                news_item.content_text or news_item.excerpt or "",
-                news_item.topic_tags or [],
-            )
-            news_item.dedupe_group_id = _build_news_dedupe_group_id(
-                company_tag_ids=company_tag_ids,
-                event_type=news_item.event_type,
-                title=news_item.title,
-                published_at=news_item.published_at,
-            )
-            news_item.freshness_bucket = freshness_bucket(news_item.published_at)
-
-            self._apply_scores(news_item, companies, market_caps=market_caps)
-            reranked += 1
-
-        self.session.commit()
         return {"scanned": scanned, "updated": updated, "reranked": reranked}
 
     def rerank_for_companies(self, company_ids: Iterable[int] | None = None) -> int:
@@ -488,20 +622,53 @@ class NewsService:
         if company_ids is not None and not target_ids:
             return 0
 
-        companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
-        if not companies:
+        self.session.flush()
+        company_rows = self.session.execute(
+            select(Company.id, Company.market_cap).where(Company.is_active.is_(True))
+        ).all()
+        if not company_rows:
             return 0
 
-        news_items = self.session.scalars(select(NewsItem).order_by(NewsItem.published_at.desc(), NewsItem.id.desc())).all()
+        companies = [SimpleNamespace(id=int(company_id), market_cap=market_cap) for company_id, market_cap in company_rows]
         market_caps = company_market_cap_percentiles(self.session)
         updated = 0
-        for news_item in news_items:
-            if target_ids and not set(news_item.company_tag_ids or []).intersection(target_ids):
-                continue
-            self._apply_scores(news_item, companies, market_caps=market_caps)
-            updated += 1
+        preserved_identity_keys = set(self.session.identity_map.keys())
+        id_query = select(NewsItem.id).order_by(NewsItem.published_at.desc(), NewsItem.id.desc())
+        if target_ids and self._is_postgres():
+            id_query = id_query.where(self._company_tag_match_expression(target_ids))
+        news_item_ids = self.session.scalars(id_query).all()
 
-        self.session.commit()
+        for start in range(0, len(news_item_ids), NEWS_BATCH_SIZE):
+            batch_ids = news_item_ids[start : start + NEWS_BATCH_SIZE]
+            batch_items = self.session.scalars(
+                select(NewsItem)
+                .where(NewsItem.id.in_(batch_ids))
+                .options(
+                    load_only(
+                        NewsItem.id,
+                        NewsItem.title,
+                        NewsItem.excerpt,
+                        NewsItem.content_text,
+                        NewsItem.published_at,
+                        NewsItem.source_weight,
+                        NewsItem.mentioned_companies,
+                        NewsItem.company_tag_ids,
+                        NewsItem.summary_json,
+                        NewsItem.summary_status,
+                    )
+                )
+            ).all()
+            items_by_id = {item.id: item for item in batch_items}
+            for news_id in batch_ids:
+                news_item = items_by_id.get(news_id)
+                if news_item is None:
+                    continue
+                if target_ids and not set(news_item.company_tag_ids or []).intersection(target_ids):
+                    continue
+                self._apply_scores(news_item, companies, market_caps=market_caps)
+                updated += 1
+            self.session.commit()
+            _release_instances(self.session, batch_items, preserved_identity_keys=preserved_identity_keys)
         return updated
 
     def _to_response(self, item: NewsItem) -> NewsItemResponse:
@@ -901,17 +1068,28 @@ class NewsService:
         watchlist_company_ids = _watchlist_company_ids(self.session)
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.settings.news_summary_backlog_days)
         counts = {"news_pending": 0, "news_pending_full_ai": 0, "news_pending_short_ai": 0}
-        items = self.session.scalars(
-            select(NewsItem)
-            .where(NewsItem.summary_status.in_(["pending", "failed", "stale"]), NewsItem.summary_attempts < 3)
+        rows = self.session.execute(
+            select(
+                NewsItem.published_at,
+                NewsItem.is_official_source,
+                NewsItem.event_type,
+                NewsItem.company_tag_ids,
+            )
+            .where(
+                NewsItem.summary_status.in_(SUMMARY_PENDING_STATUSES),
+                NewsItem.summary_attempts < 3,
+                NewsItem.published_at >= cutoff,
+            )
         ).all()
-        for news_item in items:
-            published_at = news_item.published_at if news_item.published_at.tzinfo else news_item.published_at.replace(tzinfo=timezone.utc)
+        for row in rows:
+            published_at = row.published_at if row.published_at.tzinfo else row.published_at.replace(tzinfo=timezone.utc)
             if published_at < cutoff:
                 continue
             counts["news_pending"] += 1
-            tier = self._summary_tier_for_news_item(
-                news_item,
+            tier = self._summary_tier_for_news_item_metadata(
+                is_official_source=bool(row.is_official_source),
+                event_type=row.event_type,
+                company_tag_ids=list(row.company_tag_ids or []),
                 automated=True,
                 watchlist_company_ids=watchlist_company_ids,
             )
@@ -925,13 +1103,48 @@ class NewsService:
         automated: bool,
         watchlist_company_ids: set[int],
     ) -> str:
+        return self._summary_tier_for_news_item_metadata(
+            is_official_source=bool(news_item.is_official_source),
+            event_type=news_item.event_type,
+            company_tag_ids=list(news_item.company_tag_ids or []),
+            automated=automated,
+            watchlist_company_ids=watchlist_company_ids,
+        )
+
+    @staticmethod
+    def _summary_tier_for_news_item_metadata(
+        *,
+        is_official_source: bool,
+        event_type: str | None,
+        company_tag_ids: list[int],
+        automated: bool,
+        watchlist_company_ids: set[int],
+    ) -> str:
         if not automated:
             return "full_ai"
-        if news_item.is_official_source or news_item.event_type in {"approval", "regulatory", "earnings", "acquisition"}:
+        if is_official_source or event_type in {"approval", "regulatory", "earnings", "acquisition"}:
             return "full_ai"
-        if set(news_item.company_tag_ids or []).intersection(watchlist_company_ids):
+        if set(company_tag_ids).intersection(watchlist_company_ids):
             return "full_ai"
         return "short_ai"
+
+    @staticmethod
+    def _pending_candidate_priority(row, *, watchlist_company_ids: set[int], market_caps: dict[int, float]) -> float:
+        company_ids = list(row.company_tag_ids or [])
+        return round(
+            news_summary_priority_score(
+                SimpleNamespace(
+                    source_weight=row.source_weight,
+                    title=row.title,
+                    excerpt=row.excerpt,
+                    content_text=None,
+                    published_at=row.published_at,
+                ),
+                max((market_caps.get(company_id, 0.0) for company_id in company_ids), default=0.0),
+            )
+            + (20.0 if set(company_ids).intersection(watchlist_company_ids) else 0.0),
+            2,
+        )
 
     @staticmethod
     def _qualifies_for_priority_override(news_item: NewsItem, watchlist_company_ids: set[int]) -> bool:
@@ -1040,7 +1253,172 @@ class NewsService:
             )
         return sorted(items, key=lambda item: (item.composite_score, item.published_at), reverse=True)
 
+    def _is_postgres(self) -> bool:
+        bind = self.session.get_bind()
+        return bool(bind and bind.dialect.name == "postgresql")
+
+    @staticmethod
+    def _dedupe_group_expr():
+        return func.coalesce(NewsItem.dedupe_group_id, literal("news:") + cast(NewsItem.id, String))
+
+    @staticmethod
+    def _company_tag_match_expression(company_ids: set[int]):
+        if not company_ids:
+            return literal(False)
+        return or_(*[cast(NewsItem.company_tag_ids, JSONB).contains([int(company_id)]) for company_id in sorted(company_ids)])
+
+    def _personal_sort_expr(self, watchlist_match_ids: set[int]):
+        now_expr = func.now()
+        age_hours = func.extract("epoch", now_expr - NewsItem.published_at) / 3600.0
+        bounded_age_hours = func.greatest(age_hours, 1.0)
+        recency_expr = case(
+            (age_hours <= 24.0, 100.0),
+            (age_hours <= 72.0, 80.0),
+            (age_hours <= 168.0, 60.0),
+            else_=func.greatest(10.0, 60.0 - ((func.ln(bounded_age_hours) / func.ln(2.0)) * 5.0)),
+        )
+        official_bonus = case((NewsItem.is_official_source.is_(True), 10.0), else_=0.0)
+        watchlist_bonus = (
+            case((self._company_tag_match_expression(watchlist_match_ids), 15.0), else_=0.0)
+            if watchlist_match_ids
+            else literal(0.0)
+        )
+        event_bonus = case((NewsItem.event_type.in_(tuple(HIGH_SIGNAL_EVENT_TYPES)), 8.0), else_=0.0)
+        return (
+            (0.45 * NewsItem.composite_score)
+            + (0.35 * recency_expr)
+            + official_bonus
+            + watchlist_bonus
+            + event_bonus
+        )
+
+    def _fetch_news_items_by_ids(self, ids: list[int]) -> list[NewsItem]:
+        if not ids:
+            return []
+        items = self.session.scalars(
+            select(NewsItem)
+            .where(NewsItem.id.in_(ids))
+            .options(load_only(*_list_item_news_columns()))
+        ).all()
+        items_by_id = {item.id: item for item in items}
+        return [items_by_id[item_id] for item_id in ids if item_id in items_by_id]
+
+    def _deduped_news_id_subquery(
+        self,
+        *,
+        source_name: str | None = None,
+        search: str | None = None,
+        recent_days: int | None = None,
+        company_ids: set[int] | None = None,
+    ):
+        ranking = func.row_number().over(
+            partition_by=self._dedupe_group_expr(),
+            order_by=(
+                NewsItem.is_official_source.desc(),
+                NewsItem.composite_score.desc(),
+                NewsItem.published_at.desc(),
+                NewsItem.id.desc(),
+            ),
+        ).label("representative_rank")
+        query = select(NewsItem.id.label("id"), ranking)
+        filters = []
+        if company_ids:
+            filters.append(self._company_tag_match_expression(company_ids))
+        if source_name:
+            filters.append(NewsItem.source_name == source_name)
+        if search:
+            pattern = f"%{search}%"
+            filters.append(
+                or_(
+                    NewsItem.title.ilike(pattern),
+                    NewsItem.content_text.ilike(pattern),
+                    NewsItem.excerpt.ilike(pattern),
+                )
+            )
+        if recent_days is not None:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=recent_days)
+            filters.append(NewsItem.published_at >= cutoff)
+        if filters:
+            query = query.where(and_(*filters))
+        ranked = query.subquery()
+        return select(ranked.c.id).where(ranked.c.representative_rank == 1).subquery()
+
     def _list_news_items(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        source_name: str | None = None,
+        search: str | None = None,
+        recent_days: int | None = None,
+        watchlist_id: int | None = None,
+        sort_mode: str = "importance",
+    ) -> dict[str, list[NewsItem] | int]:
+        if not self._is_postgres():
+            return self._list_news_items_python(
+                limit=limit,
+                offset=offset,
+                source_name=source_name,
+                search=search,
+                recent_days=recent_days,
+                watchlist_id=watchlist_id,
+                sort_mode=sort_mode,
+            )
+
+        watchlist_match_ids: set[int] = set()
+        if watchlist_id is not None:
+            watchlist = self.session.get(Watchlist, watchlist_id)
+            if watchlist:
+                watchlist_match_ids = {int(company_id) for company_id in (watchlist.company_ids or [])}
+            else:
+                return {"items": [], "total": 0}
+
+        representative_ids = self._deduped_news_id_subquery(
+            source_name=source_name,
+            search=search,
+            recent_days=recent_days,
+            company_ids=watchlist_match_ids or None,
+        )
+        total = self.session.scalar(select(func.count()).select_from(representative_ids)) or 0
+        order_query = select(NewsItem.id).join(representative_ids, NewsItem.id == representative_ids.c.id)
+        if sort_mode == "freshness":
+            order_query = order_query.order_by(NewsItem.published_at.desc(), NewsItem.composite_score.desc(), NewsItem.id.desc())
+        elif sort_mode == "personal":
+            order_query = order_query.order_by(
+                self._personal_sort_expr(watchlist_match_ids).desc(),
+                NewsItem.published_at.desc(),
+                NewsItem.id.desc(),
+            )
+        else:
+            order_query = order_query.order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc(), NewsItem.id.desc())
+        item_ids = self.session.scalars(order_query.offset(offset).limit(limit)).all()
+        return {"items": self._fetch_news_items_by_ids(item_ids), "total": total}
+
+    def _news_items_for_company(self, company: Company, *, sort_mode: str = "importance") -> list[NewsItem]:
+        if not self._is_postgres():
+            return self._news_items_for_company_python(company, sort_mode=sort_mode)
+        representative_ids = self._deduped_news_id_subquery(company_ids={company.id})
+        order_query = select(NewsItem.id).join(representative_ids, NewsItem.id == representative_ids.c.id)
+        if sort_mode == "freshness":
+            order_query = order_query.order_by(NewsItem.published_at.desc(), NewsItem.composite_score.desc(), NewsItem.id.desc())
+        elif sort_mode == "personal":
+            order_query = order_query.order_by(
+                self._personal_sort_expr({company.id}).desc(),
+                NewsItem.published_at.desc(),
+                NewsItem.id.desc(),
+            )
+        else:
+            order_query = order_query.order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc(), NewsItem.id.desc())
+        item_ids = self.session.scalars(order_query).all()
+        return self._fetch_news_items_by_ids(item_ids)
+
+    def _count_news_for_company(self, company: Company) -> int:
+        if not self._is_postgres():
+            return len(self._news_items_for_company_python(company, sort_mode="personal"))
+        representative_ids = self._deduped_news_id_subquery(company_ids={company.id})
+        return int(self.session.scalar(select(func.count()).select_from(representative_ids)) or 0)
+
+    def _list_news_items_python(
         self,
         *,
         limit: int,
@@ -1077,7 +1455,7 @@ class NewsService:
         total = len(sorted_items)
         return {"items": sorted_items[offset : offset + limit], "total": total}
 
-    def _news_items_for_company(self, company: Company, *, sort_mode: str = "importance") -> list[NewsItem]:
+    def _news_items_for_company_python(self, company: Company, *, sort_mode: str = "importance") -> list[NewsItem]:
         rows = self.session.scalars(select(NewsItem).order_by(NewsItem.published_at.desc(), NewsItem.id.desc())).all()
         filtered = [item for item in rows if company.id in set(item.company_tag_ids or [])]
         representatives = self._representative_news_items(filtered, sort_mode=sort_mode)

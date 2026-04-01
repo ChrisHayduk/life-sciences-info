@@ -5,7 +5,7 @@ import contextlib
 
 from sqlalchemy import select
 
-from app.db import SessionLocal, init_db
+from app.db import SessionLocal, ensure_db_indexes, init_db
 from app.models import Company
 from app.services.clinical_trials import ClinicalTrialsService
 from app.services.digests import DigestService
@@ -272,6 +272,11 @@ def run_build_daily_digest() -> int:
     return digest.id
 
 
+def run_ensure_db_indexes() -> dict[str, int | list[str]]:
+    created = ensure_db_indexes()
+    return {"count": len(created), "indexes": created}
+
+
 def run_summarize_pending(
     kind: str,
     *,
@@ -534,6 +539,10 @@ def main() -> None:
         default="",
         help="Comma-separated tickers to constrain the target set, e.g. MRK,PFE,AMGN",
     )
+    subparsers.add_parser(
+        "ensure-db-indexes",
+        help="Create one-time production indexes that support low-memory queue and news queries.",
+    )
     retag_news_parser = subparsers.add_parser(
         "retag-news-companies",
         help="Normalize explicit company tags for stored news items and rerank affected stories.",
@@ -678,6 +687,14 @@ def main() -> None:
             f"{result['new_trials']} new trials, {result['updated_trials']} updated, "
             f"{result['pruned_trials']} pruned"
             + ("; run was partial" if result["partial"] else ""),
+            flush=True,
+        )
+        return
+    if args.command == "ensure-db-indexes":
+        result = run_ensure_db_indexes()
+        print(
+            f"Database indexes ready: {result['count']} ensured"
+            + (f" ({', '.join(result['indexes'])})" if result["indexes"] else ""),
             flush=True,
         )
         return

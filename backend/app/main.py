@@ -57,26 +57,24 @@ def _cors_allow_origin_regex() -> str | None:
 
 
 def _initialize_runtime(app: FastAPI) -> None:
-    max_retries = 10
-    base_delay = 2
+    retry_delay = 5
     max_delay = 30
+    attempt = 0
 
-    for attempt in range(1, max_retries + 1):
+    while True:
+        attempt += 1
         try:
-            logger.info("DB init attempt %d/%d", attempt, max_retries)
+            logger.info("DB init attempt %d", attempt)
             init_db()
             app.state.db_ready = True
             app.state.startup_error = None
-            logger.info("Database initialization complete")
+            logger.info("Database initialization complete (attempt %d)", attempt)
             break
         except Exception as exc:
+            app.state.startup_error = str(exc)
             logger.warning("DB init attempt %d failed: %s", attempt, exc)
-            if attempt == max_retries:
-                app.state.startup_error = str(exc)
-                logger.exception("All DB init attempts exhausted")
-                return
-            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-            time.sleep(delay)
+            time.sleep(min(retry_delay, max_delay))
+            retry_delay = min(retry_delay * 2, max_delay)
 
     try:
         if settings.enable_scheduler:

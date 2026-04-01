@@ -12,7 +12,7 @@ from bs4.element import Comment
 from dateutil import parser as date_parser
 from dateutil.relativedelta import relativedelta
 from sqlalchemy import case, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.config import get_settings
 from app.models import Company, Filing, FilingNewsLink, NewsItem, Watchlist
@@ -775,6 +775,8 @@ class FilingService:
             select(Filing, Company)
             .join(Company, Filing.company_id == Company.id)
             .where(Filing.summary_status.in_(["pending", "failed", "stale"]), Filing.summary_attempts < 3)
+            .options(defer(Filing.parsed_sections), defer(Filing.diff_json))
+            .limit(100)
         ).all()
         market_caps = company_market_cap_percentiles(self.session)
         watchlist_ids = watchlist_company_ids(self.session)
@@ -1160,7 +1162,11 @@ class FilingService:
         watchlist_id: int | None = None,
         sort_mode: str = "importance",
     ) -> list[FilingListItem]:
-        query = select(Filing, Company).join(Company, Filing.company_id == Company.id)
+        query = (
+            select(Filing, Company)
+            .join(Company, Filing.company_id == Company.id)
+            .options(defer(Filing.raw_text), defer(Filing.diff_json))
+        )
         watchlist_company_match: set[int] = set()
         if watchlist_id is not None:
             watchlist = self.session.get(Watchlist, watchlist_id)
@@ -1212,7 +1218,11 @@ class FilingService:
         watchlist_id: int | None = None,
         sort_mode: str | None = None,
     ) -> dict:
-        query = select(Filing, Company).join(Company, Filing.company_id == Company.id)
+        query = (
+            select(Filing, Company)
+            .join(Company, Filing.company_id == Company.id)
+            .options(defer(Filing.raw_text), defer(Filing.diff_json))
+        )
         count_query = select(func.count()).select_from(Filing).join(Company, Filing.company_id == Company.id)
         watchlist_company_match: set[int] = set()
 

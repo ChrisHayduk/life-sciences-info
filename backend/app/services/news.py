@@ -14,7 +14,7 @@ import httpx
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.config import get_settings
 from app.models import Company, NewsItem, Watchlist
@@ -288,6 +288,8 @@ class NewsService:
         raw_candidates = self.session.scalars(
             select(NewsItem)
             .where(NewsItem.summary_status.in_(["pending", "failed", "stale"]), NewsItem.summary_attempts < 3)
+            .options(defer(NewsItem.summary_json), defer(NewsItem.score_explanation))
+            .limit(100)
         ).all()
         candidates = sorted(
             raw_candidates,

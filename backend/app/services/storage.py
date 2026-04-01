@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import mimetypes
 from pathlib import Path
 
@@ -49,6 +50,15 @@ class ObjectStore:
             response = self._object_store_client.get_object(Bucket=self.settings.object_store_bucket, Key=key)
             return response["Body"].read()
         return (self._local_dir / key).read_bytes()
+
+    def close(self) -> None:
+        if self._object_store_client is not None:
+            with contextlib.suppress(Exception):
+                self._object_store_client._endpoint.http_session.close()
+            self._object_store_client = None
+
+    def __del__(self) -> None:  # pragma: no cover - defensive cleanup
+        self.close()
 
     def guess_content_type(self, key: str) -> str:
         return mimetypes.guess_type(key)[0] or "application/octet-stream"

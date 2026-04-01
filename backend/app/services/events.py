@@ -16,12 +16,25 @@ logger = logging.getLogger(__name__)
 
 # In-memory event buffer (latest 100 events)
 _event_buffer: deque[dict[str, Any]] = deque(maxlen=100)
-_listeners: list[asyncio.Queue[dict[str, Any]]] = []
+_listeners: list[tuple[asyncio.Queue[dict[str, Any]], float]] = []
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+MAX_SSE_LISTENERS = 50
+LISTENER_TTL_SECONDS = 3600.0  # 1 hour
 
 
 def _format_sse(event: dict[str, Any]) -> str:
     return f"data: {json.dumps(event)}\n\n"
+
+
+def _prune_stale_listeners() -> None:
+    """Remove listeners older than LISTENER_TTL_SECONDS."""
+    cutoff = time.monotonic() - LISTENER_TTL_SECONDS
+    stale = [entry for entry in _listeners if entry[1] < cutoff]
+    for entry in stale:
+        with contextlib.suppress(ValueError):
+            _listeners.remove(entry)
+    if stale:
+        logger.info("Pruned %d stale SSE listeners; %d remain", len(stale), len(_listeners))
 
 
 def listener_count() -> int:
@@ -41,7 +54,7 @@ def publish_event(event_type: str, data: dict[str, Any] | None = None) -> None:
         "timestamp": time.time(),
     }
     _event_buffer.append(event)
-    for queue in tuple(_listeners):
+    for queue, _created_at in tuple(_listeners):
         try:
             queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -55,8 +68,16 @@ async def event_stream(
     heartbeat_interval: float = HEARTBEAT_INTERVAL_SECONDS,
 ) -> AsyncIterator[str]:
     """Async generator that yields SSE-formatted events."""
+    _prune_stale_listeners()
+
+    if len(_listeners) >= MAX_SSE_LISTENERS:
+        logger.warning("SSE listener cap reached (%d); rejecting new connection", MAX_SSE_LISTENERS)
+        yield _format_sse({"type": "error", "data": {"message": "Too many listeners"}, "timestamp": time.time()})
+        return
+
     queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=50)
-    _listeners.append(queue)
+    entry = (queue, time.monotonic())
+    _listeners.append(entry)
     logger.debug("SSE listener connected; %s active listeners", len(_listeners))
     try:
         # Send recent events as initial batch
@@ -77,5 +98,5 @@ async def event_stream(
             yield _format_sse(event)
     finally:
         with contextlib.suppress(ValueError):
-            _listeners.remove(queue)
+            _listeners.remove(entry)
         logger.debug("SSE listener disconnected; %s active listeners", len(_listeners))

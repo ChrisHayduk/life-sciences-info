@@ -303,6 +303,9 @@ const API_BASE = (process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000
   .trim()
   .replace(/\/$/, "");
 const API_REQUEST_TIMEOUT_MS = 8000;
+const DASHBOARD_TIMEOUT_MS = 15000;
+const MAX_RETRIES = 2;
+const RETRY_BACKOFF_MS = [500, 1000];
 
 function logApiFailure(path: string, error: unknown, extra?: Record<string, unknown>) {
   if (typeof window !== "undefined") {
@@ -320,33 +323,70 @@ function logApiFailure(path: string, error: unknown, extra?: Record<string, unkn
   });
 }
 
-async function fetchJSON<T>(path: string, revalidate?: number): Promise<T> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+function isRetryable(error: unknown, status?: number): boolean {
+  if (error instanceof Error && error.name === "AbortError") return true;
+  if (status && (status === 502 || status === 503 || status === 504 || status === 408)) return true;
+  if (error instanceof TypeError) return true; // network error
+  return false;
+}
 
-  try {
-    const response = await fetch(`${API_BASE}${path}`, {
-      next: revalidate !== undefined ? { revalidate } : undefined,
-      cache: revalidate !== undefined ? undefined : "no-store",
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const error = new Error(`Failed to fetch ${path}: ${response.status}`);
-      logApiFailure(path, error, { status: response.status, revalidate });
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchJSON<T>(path: string, revalidate?: number, timeoutMs?: number): Promise<T> {
+  const effectiveTimeout = timeoutMs ?? API_REQUEST_TIMEOUT_MS;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await sleep(RETRY_BACKOFF_MS[attempt - 1] ?? 1000);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), effectiveTimeout);
+
+    try {
+      const response = await fetch(`${API_BASE}${path}`, {
+        next: revalidate !== undefined ? { revalidate } : undefined,
+        cache: revalidate !== undefined ? undefined : "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const error = new Error(`Failed to fetch ${path}: ${response.status}`);
+        if (attempt < MAX_RETRIES && isRetryable(error, response.status)) {
+          logApiFailure(path, error, { status: response.status, attempt, willRetry: true });
+          lastError = error;
+          continue;
+        }
+        logApiFailure(path, error, { status: response.status, revalidate });
+        throw error;
+      }
+      return response.json() as Promise<T>;
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        const timeoutError = new Error(`Failed to fetch ${path}: request timed out after ${effectiveTimeout}ms`);
+        if (attempt < MAX_RETRIES) {
+          logApiFailure(path, timeoutError, { timeoutMs: effectiveTimeout, attempt, willRetry: true });
+          lastError = timeoutError;
+          continue;
+        }
+        logApiFailure(path, timeoutError, { timeoutMs: effectiveTimeout, revalidate });
+        throw timeoutError;
+      }
+      if (attempt < MAX_RETRIES && isRetryable(error)) {
+        logApiFailure(path, error, { attempt, willRetry: true });
+        lastError = error;
+        continue;
+      }
+      logApiFailure(path, error, { revalidate });
       throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-    return response.json() as Promise<T>;
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      const timeoutError = new Error(`Failed to fetch ${path}: request timed out after ${API_REQUEST_TIMEOUT_MS}ms`);
-      logApiFailure(path, timeoutError, { timeoutMs: API_REQUEST_TIMEOUT_MS, revalidate });
-      throw timeoutError;
-    }
-    logApiFailure(path, error, { revalidate });
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw lastError;
 }
 
 function buildQuery(params: Record<string, string | number | undefined>): string {
@@ -360,7 +400,7 @@ function buildQuery(params: Record<string, string | number | undefined>): string
 }
 
 export const api = {
-  dashboard: () => fetchJSON<DashboardData>("/dashboard"),
+  dashboard: () => fetchJSON<DashboardData>("/dashboard", undefined, DASHBOARD_TIMEOUT_MS),
   companies: (search?: string) =>
     fetchJSON<Company[]>(`/companies${buildQuery({ search })}`, 60),
   company: (id: string) => fetchJSON<CompanyDetail>(`/companies/${id}`),

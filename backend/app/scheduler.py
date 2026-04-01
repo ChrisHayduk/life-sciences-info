@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import resource
 import sys
@@ -56,6 +57,10 @@ def _logged_job(name: str, fn, **kwargs):
             rss_after - rss_before,
         )
         raise
+    finally:
+        collected = gc.collect()
+        if collected:
+            logger.debug("GC after job %s collected %d objects", name, collected)
 
 
 def build_scheduler(background: bool = False) -> BlockingScheduler | BackgroundScheduler:

@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import gc
 import logging
 import resource
 import sys
@@ -8,6 +9,9 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from app.api.routes import router
 from app.config import get_settings
@@ -70,6 +74,19 @@ def _initialize_runtime(app: FastAPI) -> None:
         logger.exception("Background runtime initialization failed")
 
 
+class ReadinessGateMiddleware(BaseHTTPMiddleware):
+    """Return 503 for non-health requests until the runtime is ready."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path != "/health" and not getattr(request.app.state, "runtime_ready", False):
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Service starting up"},
+                headers={"Retry-After": "5"},
+            )
+        return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.scheduler = None
@@ -84,11 +101,13 @@ async def lifespan(app: FastAPI):
     finally:
         scheduler = getattr(app.state, "scheduler", None)
         if scheduler:
-            scheduler.shutdown(wait=False)
+            scheduler.shutdown(wait=True)
+        gc.collect()
 
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(ReadinessGateMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_allow_origins(),

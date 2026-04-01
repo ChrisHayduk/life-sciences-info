@@ -34,7 +34,10 @@ if database_url.startswith("sqlite:///"):
     sqlite_path.parent.mkdir(parents=True, exist_ok=True)
 
 connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
-engine = create_engine(database_url, future=True, connect_args=connect_args, pool_pre_ping=True)
+_pool_kwargs: dict = {"pool_pre_ping": True}
+if not database_url.startswith("sqlite"):
+    _pool_kwargs.update(pool_size=5, max_overflow=10, pool_recycle=1800, pool_timeout=30)
+engine = create_engine(database_url, future=True, connect_args=connect_args, **_pool_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
 
 

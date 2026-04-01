@@ -457,8 +457,8 @@ def filing_pdf(filing_id: int, session: Session = Depends(get_session)):
     filing = session.get(Filing, filing_id)
     if not filing or not filing.pdf_artifact_key:
         raise HTTPException(status_code=404, detail="PDF not found")
-    store = ObjectStore()
-    payload = store.get_bytes(filing.pdf_artifact_key)
+    with _service_scope(ObjectStore()) as store:
+        payload = store.get_bytes(filing.pdf_artifact_key)
     return Response(content=payload, media_type="application/pdf")
 
 

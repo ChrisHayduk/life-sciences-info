@@ -486,6 +486,7 @@ class FilingService:
         self._owns_sec_client = sec_client is None
         self._owns_summarizer = summarizer is None
         self._owns_market_data_client = market_data_client is None
+        self._owns_object_store = object_store is None
         self.sec_client = sec_client or SECClient()
         self.summarizer = summarizer or OpenAISummarizer()
         self.market_data_client = market_data_client or MarketDataClient()
@@ -502,6 +503,9 @@ class FilingService:
         if self._owns_market_data_client:
             with contextlib.suppress(Exception):
                 self.market_data_client.close()
+        if self._owns_object_store:
+            with contextlib.suppress(Exception):
+                self.object_store.close()
 
     def __del__(self) -> None:  # pragma: no cover - defensive cleanup
         self.close()

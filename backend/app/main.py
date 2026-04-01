@@ -4,6 +4,7 @@ import logging
 import resource
 import sys
 import threading
+import time
 from threading import Thread
 from urllib.parse import urlparse
 
@@ -56,12 +57,28 @@ def _cors_allow_origin_regex() -> str | None:
 
 
 def _initialize_runtime(app: FastAPI) -> None:
-    try:
-        logger.info("Starting background runtime initialization")
-        init_db()
-        app.state.db_ready = True
-        logger.info("Database initialization complete")
+    max_retries = 10
+    base_delay = 2
+    max_delay = 30
 
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info("DB init attempt %d/%d", attempt, max_retries)
+            init_db()
+            app.state.db_ready = True
+            app.state.startup_error = None
+            logger.info("Database initialization complete")
+            break
+        except Exception as exc:
+            logger.warning("DB init attempt %d failed: %s", attempt, exc)
+            if attempt == max_retries:
+                app.state.startup_error = str(exc)
+                logger.exception("All DB init attempts exhausted")
+                return
+            delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+            time.sleep(delay)
+
+    try:
         if settings.enable_scheduler:
             scheduler = build_scheduler(background=True)
             scheduler.start()
@@ -69,9 +86,9 @@ def _initialize_runtime(app: FastAPI) -> None:
             logger.info("Scheduler started")
 
         app.state.runtime_ready = True
-    except Exception as exc:  # pragma: no cover - deployment/runtime behavior
+    except Exception as exc:  # pragma: no cover
         app.state.startup_error = str(exc)
-        logger.exception("Background runtime initialization failed")
+        logger.exception("Post-DB runtime initialization failed")
 
 
 class ReadinessGateMiddleware(BaseHTTPMiddleware):

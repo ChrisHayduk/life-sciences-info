@@ -618,4 +618,7 @@ def test_digest_email_message_contains_subject_and_links(db_session, company, mo
     assert 'href="https://example.com"' in html
     assert "Open article" in html
     assert "Source homepage" in html
+    assert "Article URL:" in html
+    assert "Source URL:" in html
+    assert "text-decoration:underline" in html
     get_settings.cache_clear()

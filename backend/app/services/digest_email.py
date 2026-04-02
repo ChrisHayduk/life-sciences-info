@@ -158,14 +158,14 @@ class DigestEmailService:
                 source_homepage = self._source_homepage(item)
                 entry = "<div style=\"padding:14px 16px;margin:0 0 10px;border:1px solid #e5e7eb;border-radius:14px;background:#f9fafb;\">"
                 entry += (
-                    f"<a href=\"{escape(canonical_url, quote=True)}\" style=\"font-weight:700;color:#111827;text-decoration:none;\">{title}</a>"
+                    f"<a href=\"{escape(canonical_url, quote=True)}\" style=\"font-weight:700;color:#1d4ed8;text-decoration:underline;\">{title}</a>"
                     if canonical_url
                     else title
                 )
                 if source_name:
                     entry += "<div style=\"margin-top:4px;color:#6b7280;\">"
                     entry += (
-                        f"<a href=\"{escape(source_homepage, quote=True)}\" style=\"color:#2563eb;text-decoration:none;\">{source_name}</a>"
+                        f"<a href=\"{escape(source_homepage, quote=True)}\" style=\"color:#2563eb;text-decoration:underline;\">{source_name}</a>"
                         if source_homepage
                         else source_name
                     )
@@ -181,14 +181,26 @@ class DigestEmailService:
                 action_links: list[str] = []
                 if canonical_url:
                     action_links.append(
-                        f"<a href=\"{escape(canonical_url, quote=True)}\" style=\"color:#2563eb;text-decoration:none;\">Open article</a>"
+                        f"<a href=\"{escape(canonical_url, quote=True)}\" style=\"display:inline-block;padding:8px 12px;background:#dbeafe;border:1px solid #93c5fd;border-radius:999px;color:#1d4ed8;text-decoration:none;font-weight:600;\">Open article</a>"
                     )
                 if source_homepage:
                     action_links.append(
-                        f"<a href=\"{escape(source_homepage, quote=True)}\" style=\"color:#2563eb;text-decoration:none;\">Source homepage</a>"
+                        f"<a href=\"{escape(source_homepage, quote=True)}\" style=\"display:inline-block;padding:8px 12px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:999px;color:#4338ca;text-decoration:none;font-weight:600;\">Source homepage</a>"
                     )
                 if action_links:
-                    entry += "<div style=\"margin-top:10px;font-size:13px;\">" + " &middot; ".join(action_links) + "</div>"
+                    entry += "<div style=\"margin-top:12px;\">" + " ".join(action_links) + "</div>"
+                if canonical_url:
+                    entry += (
+                        "<div style=\"margin-top:10px;font-size:12px;color:#6b7280;\">"
+                        f"Article URL: <a href=\"{escape(canonical_url, quote=True)}\" style=\"color:#2563eb;text-decoration:underline;\">{escape(canonical_url)}</a>"
+                        "</div>"
+                    )
+                if source_homepage:
+                    entry += (
+                        "<div style=\"margin-top:6px;font-size:12px;color:#6b7280;\">"
+                        f"Source URL: <a href=\"{escape(source_homepage, quote=True)}\" style=\"color:#2563eb;text-decoration:underline;\">{escape(source_homepage)}</a>"
+                        "</div>"
+                    )
                 entry += "</div>"
                 parts.append(entry)
             parts.append("</div>")

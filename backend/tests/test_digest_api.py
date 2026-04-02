@@ -606,6 +606,7 @@ def test_digest_email_message_contains_subject_and_links(db_session, company, mo
     assert f"https://life-sciences-info.vercel.app/filings/{filing.id}" in plain
     assert f"https://life-sciences-info.vercel.app/companies/{company.id}" in plain
     assert "https://example.com/formatted-story" in plain
+    assert "Source: FDA Press Releases — https://example.com" in plain
     assert "# Life Sciences Digest" not in plain
     assert "**meaningful update**" not in plain
     assert "Executive take" in plain
@@ -613,4 +614,6 @@ def test_digest_email_message_contains_subject_and_links(db_session, company, mo
     assert "<h3" in html
     assert "<strong>meaningful update</strong>" in html
     assert "<ol" in html
+    assert 'href="https://example.com/formatted-story"' in html
+    assert 'href="https://example.com"' in html
     get_settings.cache_clear()

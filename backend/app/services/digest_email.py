@@ -5,6 +5,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from html import escape
+from urllib.parse import urlparse
 
 from app.config import Settings, get_settings
 from app.models import Digest
@@ -94,6 +95,9 @@ class DigestEmailService:
                 )
                 if item.get("canonical_url"):
                     lines.append(f"  Article: {item['canonical_url']}")
+                source_homepage = self._source_homepage(item)
+                if source_homepage and item.get("source_name"):
+                    lines.append(f"  Source: {item['source_name']} — {source_homepage}")
                 for company_id, company_name in zip(item.get("company_tag_ids") or [], item.get("mentioned_companies") or []):
                     lines.append(f"  Company: {company_name} — {self._frontend_url(f'/companies/{company_id}')}")
 
@@ -151,6 +155,7 @@ class DigestEmailService:
                 title = escape(item.get("title") or "Untitled news item")
                 source_name = escape(item.get("source_name") or "")
                 canonical_url = item.get("canonical_url")
+                source_homepage = self._source_homepage(item)
                 entry = "<div style=\"padding:14px 16px;margin:0 0 10px;border:1px solid #e5e7eb;border-radius:14px;background:#f9fafb;\">"
                 entry += (
                     f"<a href=\"{escape(canonical_url, quote=True)}\" style=\"font-weight:700;color:#111827;text-decoration:none;\">{title}</a>"
@@ -158,7 +163,13 @@ class DigestEmailService:
                     else title
                 )
                 if source_name:
-                    entry += f"<div style=\"margin-top:4px;color:#6b7280;\">{source_name}</div>"
+                    entry += "<div style=\"margin-top:4px;color:#6b7280;\">"
+                    entry += (
+                        f"<a href=\"{escape(source_homepage, quote=True)}\" style=\"color:#2563eb;text-decoration:none;\">{source_name}</a>"
+                        if source_homepage
+                        else source_name
+                    )
+                    entry += "</div>"
                 company_links: list[str] = []
                 for company_id, company_name in zip(item.get("company_tag_ids") or [], item.get("mentioned_companies") or []):
                     company_url = self._frontend_url(f"/companies/{company_id}")
@@ -288,3 +299,16 @@ class DigestEmailService:
             rendered,
         )
         return rendered
+
+    @staticmethod
+    def _source_homepage(item: dict) -> str | None:
+        explicit = item.get("source_homepage")
+        if explicit:
+            return str(explicit)
+        canonical_url = item.get("canonical_url")
+        if not canonical_url:
+            return None
+        parsed = urlparse(str(canonical_url))
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        return f"{parsed.scheme}://{parsed.netloc}"

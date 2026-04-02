@@ -506,6 +506,103 @@ class NewsService:
     def count_news_for_company(self, company: Company) -> int:
         return self._count_news_for_company(company)
 
+    def summarize_for_digest_window(
+        self,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        limit: int,
+    ) -> dict[str, int | float]:
+        budget_service = SummaryBudgetService(self.session)
+        effective_limit = max(limit, 0)
+        if effective_limit <= 0:
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": budget_service.remaining("news") if self.settings.openai_api_key else 0,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("news"), 4) if self.settings.openai_api_key else 0.0,
+            }
+
+        companies = self.session.scalars(select(Company).where(Company.is_active.is_(True))).all()
+        watchlist_company_ids = _watchlist_company_ids(self.session)
+        candidate_ids = [
+            int(row.id)
+            for row in self.session.execute(
+                select(NewsItem.id)
+                .where(
+                    NewsItem.summary_status.in_(SUMMARY_PENDING_STATUSES),
+                    NewsItem.summary_attempts < 3,
+                    NewsItem.published_at >= window_start,
+                    NewsItem.published_at < window_end,
+                )
+                .order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc(), NewsItem.id.desc())
+                .limit(max(effective_limit * 4, effective_limit))
+            ).all()
+        ]
+        if not candidate_ids:
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": budget_service.remaining("news") if self.settings.openai_api_key else 0,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("news"), 4) if self.settings.openai_api_key else 0.0,
+            }
+
+        candidates = self.session.scalars(
+            select(NewsItem)
+            .where(NewsItem.id.in_(candidate_ids))
+            .options(defer(NewsItem.score_explanation))
+        ).all()
+        candidate_order = {news_id: index for index, news_id in enumerate(candidate_ids)}
+        candidates.sort(key=lambda item: candidate_order.get(item.id, len(candidate_order)))
+
+        summarized = 0
+        for news_item in candidates:
+            if news_item.summary_status not in SUMMARY_PENDING_STATUSES or news_item.summary_attempts >= 3:
+                continue
+            is_override = self._qualifies_for_priority_override(news_item, watchlist_company_ids)
+            if self.settings.openai_api_key:
+                budget_kind = self._select_automated_budget_kind(
+                    budget_service,
+                    primary_kind="news",
+                    allow_override=is_override,
+                )
+                if budget_kind is None:
+                    continue
+            else:
+                budget_kind = "news"
+            try:
+                preferred_tier = self._summary_tier_for_news_item(
+                    news_item,
+                    automated=True,
+                    watchlist_company_ids=watchlist_company_ids,
+                )
+                summary_tier = self._resolve_summary_tier(
+                    budget_service,
+                    preferred_tier=preferred_tier,
+                    automated=True,
+                )
+                if summary_tier is None:
+                    continue
+                self._apply_summary(
+                    news_item,
+                    trigger="auto",
+                    summary_tier=summary_tier,
+                    budget_kind=budget_kind,
+                )
+                self._apply_scores(news_item, companies)
+            except Exception:
+                news_item.summary_status = "failed"
+                news_item.summary_attempts += 1
+                continue
+            summarized += 1
+            if summarized >= effective_limit:
+                break
+
+        self.session.commit()
+        return {
+            "summarized": summarized,
+            "remaining_daily_budget": budget_service.remaining("news") if self.settings.openai_api_key else 0,
+            "remaining_daily_budget_usd": round(budget_service.remaining_usd("news"), 4) if self.settings.openai_api_key else 0.0,
+        }
+
     def retag_company_news(
         self,
         *,

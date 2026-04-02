@@ -12,6 +12,8 @@ from app.config import get_settings
 from app.models import Company, Digest, Filing, NewsItem
 from app.schemas import DigestResponse
 from app.services.digest_email import DigestEmailService
+from app.services.filings import FilingService
+from app.services.news import NewsService
 from app.services.summarization import OpenAISummarizer, UsageMetrics
 from app.services.summary_budget import SummaryBudgetService
 
@@ -200,6 +202,13 @@ class DigestService:
                 self.session.commit()
             return existing
 
+        self._proactively_summarize_digest_candidates(
+            window_start=window_start,
+            window_end=window_end,
+            filing_limit=filing_limit,
+            news_limit=news_limit,
+        )
+
         candidate_filings = self.session.scalars(
             select(Filing)
             .where(
@@ -331,6 +340,75 @@ class DigestService:
             return result.text, result.usage
 
         return self.summarizer._fallback_digest_narrative(filing_summaries, news_summaries), UsageMetrics(model="fallback-local")
+
+    def _proactively_summarize_digest_candidates(
+        self,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        filing_limit: int,
+        news_limit: int,
+    ) -> None:
+        filing_gap = self._digest_candidate_gap(
+            model=Filing,
+            timestamp_column=Filing.filed_at,
+            window_start=window_start,
+            window_end=window_end,
+            limit=filing_limit,
+        )
+        news_gap = self._digest_candidate_gap(
+            model=NewsItem,
+            timestamp_column=NewsItem.published_at,
+            window_start=window_start,
+            window_end=window_end,
+            limit=news_limit,
+        )
+
+        if filing_gap > 0:
+            filing_service = FilingService(self.session, summarizer=self.summarizer)
+            try:
+                result = filing_service.summarize_for_digest_window(
+                    window_start=window_start,
+                    window_end=window_end,
+                    limit=filing_gap,
+                )
+                logger.info("Digest filing catch-up summarized=%s", result.get("summarized", 0))
+            finally:
+                filing_service.close()
+
+        if news_gap > 0:
+            news_service = NewsService(self.session, summarizer=self.summarizer)
+            try:
+                result = news_service.summarize_for_digest_window(
+                    window_start=window_start,
+                    window_end=window_end,
+                    limit=news_gap,
+                )
+                logger.info("Digest news catch-up summarized=%s", result.get("summarized", 0))
+            finally:
+                news_service.close()
+
+    def _digest_candidate_gap(
+        self,
+        *,
+        model: type[Filing] | type[NewsItem],
+        timestamp_column,
+        window_start: datetime,
+        window_end: datetime,
+        limit: int,
+    ) -> int:
+        rows = self.session.execute(
+            select(model.summary_status, model.summary_json)
+            .where(
+                timestamp_column >= window_start,
+                timestamp_column < window_end,
+            )
+            .order_by(model.composite_score.desc(), timestamp_column.desc(), model.id.desc())
+            .limit(max(limit * 3, limit))
+        ).all()
+        summarized = sum(1 for row in rows if row.summary_status == "complete" or (row.summary_json or {}).get("summary"))
+        pending = len(rows) - summarized
+        return min(max(limit - summarized, 0), pending)
 
     @staticmethod
     def _has_summary(item: Filing | NewsItem) -> bool:

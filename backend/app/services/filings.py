@@ -988,6 +988,108 @@ class FilingService:
         self.session.commit()
         return {"status": "summarized", "remaining_override_budget": self._remaining_override_budget()}
 
+    def summarize_for_digest_window(
+        self,
+        *,
+        window_start: datetime,
+        window_end: datetime,
+        limit: int,
+    ) -> dict[str, int | float]:
+        budget_service = SummaryBudgetService(self.session)
+        effective_limit = max(limit, 0)
+        if effective_limit <= 0:
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": budget_service.remaining("filing") if self.settings.openai_api_key else 0,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("filing"), 4) if self.settings.openai_api_key else 0.0,
+            }
+
+        watchlist_ids = watchlist_company_ids(self.session)
+        candidate_ids = [
+            int(row.id)
+            for row in self.session.execute(
+                select(Filing.id)
+                .where(
+                    Filing.summary_status.in_(SUMMARY_PENDING_STATUSES),
+                    Filing.summary_attempts < 3,
+                    Filing.filed_at >= window_start,
+                    Filing.filed_at < window_end,
+                )
+                .order_by(Filing.composite_score.desc(), Filing.filed_at.desc(), Filing.id.desc())
+                .limit(max(effective_limit * 4, effective_limit))
+            ).all()
+        ]
+        if not candidate_ids:
+            return {
+                "summarized": 0,
+                "remaining_daily_budget": budget_service.remaining("filing") if self.settings.openai_api_key else 0,
+                "remaining_daily_budget_usd": round(budget_service.remaining_usd("filing"), 4) if self.settings.openai_api_key else 0.0,
+            }
+
+        raw_candidates = self.session.execute(
+            select(Filing, Company)
+            .join(Company, Filing.company_id == Company.id)
+            .where(Filing.id.in_(candidate_ids))
+            .options(defer(Filing.diff_json))
+        ).all()
+        candidate_order = {filing_id: index for index, filing_id in enumerate(candidate_ids)}
+        candidates = sorted(
+            raw_candidates,
+            key=lambda row: candidate_order.get(row[0].id, len(candidate_order)),
+        )
+
+        summarized = 0
+        for filing, company in candidates:
+            if filing.summary_status not in SUMMARY_PENDING_STATUSES or filing.summary_attempts >= 3:
+                continue
+            is_override = self._qualifies_for_priority_override(filing, company.id in watchlist_ids)
+            if self.settings.openai_api_key:
+                budget_kind = self._select_automated_budget_kind(
+                    budget_service,
+                    primary_kind="filing",
+                    allow_override=is_override,
+                )
+                if budget_kind is None:
+                    continue
+            else:
+                budget_kind = "filing"
+            prior = self._prior_comparable_filing(company.id, filing)
+            try:
+                preferred_tier = self._summary_tier_for_filing(
+                    filing,
+                    automated=True,
+                    watchlist_match=company.id in watchlist_ids,
+                )
+                summary_tier = self._resolve_summary_tier(
+                    budget_service,
+                    preferred_tier=preferred_tier,
+                    automated=True,
+                )
+                if summary_tier is None:
+                    continue
+                self._apply_summary(
+                    filing,
+                    company,
+                    prior_filing=prior,
+                    trigger="auto",
+                    summary_tier=summary_tier,
+                    budget_kind=budget_kind,
+                )
+            except Exception:
+                filing.summary_status = "failed"
+                filing.summary_attempts += 1
+                continue
+            summarized += 1
+            if summarized >= effective_limit:
+                break
+
+        self.session.commit()
+        return {
+            "summarized": summarized,
+            "remaining_daily_budget": budget_service.remaining("filing") if self.settings.openai_api_key else 0,
+            "remaining_daily_budget_usd": round(budget_service.remaining_usd("filing"), 4) if self.settings.openai_api_key else 0.0,
+        }
+
     def rerank_for_companies(self, company_ids: Iterable[int] | None = None) -> int:
         target_ids = sorted({int(company_id) for company_id in (company_ids or [])})
         if company_ids is not None and not target_ids:

@@ -200,6 +200,150 @@ def test_daily_digest_reuses_existing_window(db_session, company):
     assert digest.payload["news"][0]["id"] == news.id
 
 
+def test_daily_digest_proactively_summarizes_top_pending_items(db_session, company, monkeypatch):
+    now = datetime(2026, 3, 31, 12, 0, tzinfo=timezone.utc)
+    filing_complete = Filing(
+        company_id=company.id,
+        accession_number="digest-fill-complete",
+        form_type="8-K",
+        normalized_form_type="8-K",
+        title="Completed filing",
+        filed_at=now - timedelta(hours=20),
+        filing_url="https://example.com/complete-index",
+        original_document_url="https://example.com/complete-doc",
+        summary_json={"summary": "Already summarized", "importance_score": 82},
+        summary_status="complete",
+        summary_tier="full_ai",
+        composite_score=95,
+    )
+    filing_pending_one = Filing(
+        company_id=company.id,
+        accession_number="digest-fill-pending-1",
+        form_type="8-K",
+        normalized_form_type="8-K",
+        title="Pending filing one",
+        filed_at=now - timedelta(hours=19),
+        filing_url="https://example.com/pending-1-index",
+        original_document_url="https://example.com/pending-1-doc",
+        summary_status="pending",
+        composite_score=90,
+    )
+    filing_pending_two = Filing(
+        company_id=company.id,
+        accession_number="digest-fill-pending-2",
+        form_type="10-Q",
+        normalized_form_type="10-Q",
+        title="Pending filing two",
+        filed_at=now - timedelta(hours=18),
+        filing_url="https://example.com/pending-2-index",
+        original_document_url="https://example.com/pending-2-doc",
+        summary_status="pending",
+        composite_score=88,
+    )
+    news_complete = NewsItem(
+        source_name="FDA Press Releases",
+        source_weight=1.0,
+        feed_url="https://example.com/rss",
+        title="Completed news",
+        canonical_url="https://example.com/complete-news",
+        excerpt="Completed news",
+        content_text="Completed news",
+        published_at=now - timedelta(hours=17),
+        article_hash="digest-fill-news-complete",
+        mentioned_companies=["Apex Bio"],
+        company_tag_ids=[company.id],
+        summary_json={"summary": "Already summarized news", "importance_score": 78},
+        summary_status="complete",
+        summary_tier="full_ai",
+        composite_score=93,
+    )
+    news_pending_one = NewsItem(
+        source_name="FDA Press Releases",
+        source_weight=1.0,
+        feed_url="https://example.com/rss",
+        title="Pending news one",
+        canonical_url="https://example.com/pending-news-1",
+        excerpt="Pending news one",
+        content_text="Pending news one",
+        published_at=now - timedelta(hours=16),
+        article_hash="digest-fill-news-pending-1",
+        mentioned_companies=["Apex Bio"],
+        company_tag_ids=[company.id],
+        summary_status="pending",
+        composite_score=91,
+    )
+    news_pending_two = NewsItem(
+        source_name="Fierce Pharma",
+        source_weight=0.95,
+        feed_url="https://example.com/rss",
+        title="Pending news two",
+        canonical_url="https://example.com/pending-news-2",
+        excerpt="Pending news two",
+        content_text="Pending news two",
+        published_at=now - timedelta(hours=15),
+        article_hash="digest-fill-news-pending-2",
+        mentioned_companies=["Apex Bio"],
+        company_tag_ids=[company.id],
+        summary_status="pending",
+        composite_score=89,
+    )
+    db_session.add_all(
+        [
+            filing_complete,
+            filing_pending_one,
+            filing_pending_two,
+            news_complete,
+            news_pending_one,
+            news_pending_two,
+        ]
+    )
+    db_session.commit()
+
+    calls: dict[str, int] = {}
+
+    def fake_filing_summary(self, *, window_start, window_end, limit):
+        calls["filings"] = limit
+        pending = (
+            db_session.query(Filing)
+            .filter(Filing.summary_status == "pending", Filing.filed_at >= window_start, Filing.filed_at < window_end)
+            .order_by(Filing.composite_score.desc(), Filing.filed_at.desc(), Filing.id.desc())
+            .limit(limit)
+            .all()
+        )
+        for filing in pending:
+            filing.summary_status = "complete"
+            filing.summary_tier = "short_ai"
+            filing.summary_json = {"summary": f"Filled filing {filing.id}", "importance_score": 70}
+        db_session.flush()
+        return {"summarized": len(pending)}
+
+    def fake_news_summary(self, *, window_start, window_end, limit):
+        calls["news"] = limit
+        pending = (
+            db_session.query(NewsItem)
+            .filter(NewsItem.summary_status == "pending", NewsItem.published_at >= window_start, NewsItem.published_at < window_end)
+            .order_by(NewsItem.composite_score.desc(), NewsItem.published_at.desc(), NewsItem.id.desc())
+            .limit(limit)
+            .all()
+        )
+        for item in pending:
+            item.summary_status = "complete"
+            item.summary_tier = "short_ai"
+            item.summary_json = {"summary": f"Filled news {item.id}", "importance_score": 68}
+        db_session.flush()
+        return {"summarized": len(pending)}
+
+    monkeypatch.setattr("app.services.digests.FilingService.summarize_for_digest_window", fake_filing_summary)
+    monkeypatch.setattr("app.services.digests.NewsService.summarize_for_digest_window", fake_news_summary)
+
+    digest_service = DigestService(db_session)
+    digest = digest_service.build_daily_digest(reference=now)
+
+    assert calls == {"filings": 2, "news": 2}
+    assert len(digest.payload["filings"]) == 3
+    assert len(digest.payload["news"]) == 3
+
+
 class FakeDigestEmailSender:
     def __init__(self, *, enabled: bool = True, configured: bool = True, fail_times: int = 0):
         self.enabled = enabled

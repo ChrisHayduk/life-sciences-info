@@ -42,8 +42,8 @@ class DigestEmailService:
         message["Subject"] = digest.title
         message["From"] = self.settings.digest_email_from
         message["To"] = self.settings.digest_email_to
-        message.set_content(self._plain_text_body(digest))
-        message.add_alternative(self._html_body(digest), subtype="html")
+        message.set_content(self._plain_text_body(digest), charset="utf-8")
+        message.add_alternative(self._html_body(digest), subtype="html", charset="utf-8")
         return message
 
     def send_daily_digest(self, digest: Digest) -> None:
@@ -178,6 +178,17 @@ class DigestEmailService:
                     )
                 if company_links:
                     entry += "<div style=\"margin-top:8px;color:#4b5563;\">" + ", ".join(company_links) + "</div>"
+                action_links: list[str] = []
+                if canonical_url:
+                    action_links.append(
+                        f"<a href=\"{escape(canonical_url, quote=True)}\" style=\"color:#2563eb;text-decoration:none;\">Open article</a>"
+                    )
+                if source_homepage:
+                    action_links.append(
+                        f"<a href=\"{escape(source_homepage, quote=True)}\" style=\"color:#2563eb;text-decoration:none;\">Source homepage</a>"
+                    )
+                if action_links:
+                    entry += "<div style=\"margin-top:10px;font-size:13px;\">" + " &middot; ".join(action_links) + "</div>"
                 entry += "</div>"
                 parts.append(entry)
             parts.append("</div>")

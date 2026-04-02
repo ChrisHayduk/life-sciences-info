@@ -594,6 +594,8 @@ def test_digest_email_message_contains_subject_and_links(db_session, company, mo
     db_session.commit()
 
     digest = DigestService(db_session).build_daily_digest(reference=now)
+    digest.narrative_summary = """# Life Sciences Digest\n\n## Executive take\nA **meaningful update** happened.\n\n## What to open next\n1. Review the filing.\n2. Review the article."""
+    db_session.commit()
     sender = DigestEmailService(smtp_factory=FakeSMTP)
     message = sender.build_daily_digest_message(digest)
 
@@ -604,5 +606,11 @@ def test_digest_email_message_contains_subject_and_links(db_session, company, mo
     assert f"https://life-sciences-info.vercel.app/filings/{filing.id}" in plain
     assert f"https://life-sciences-info.vercel.app/companies/{company.id}" in plain
     assert "https://example.com/formatted-story" in plain
+    assert "# Life Sciences Digest" not in plain
+    assert "**meaningful update**" not in plain
+    assert "Executive take" in plain
     assert "https://life-sciences-info.vercel.app/digests" in html
+    assert "<h3" in html
+    assert "<strong>meaningful update</strong>" in html
+    assert "<ol" in html
     get_settings.cache_clear()

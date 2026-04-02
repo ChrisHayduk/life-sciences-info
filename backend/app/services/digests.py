@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -10,8 +11,11 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.models import Company, Digest, Filing, NewsItem
 from app.schemas import DigestResponse
+from app.services.digest_email import DigestEmailService
 from app.services.summarization import OpenAISummarizer, UsageMetrics
 from app.services.summary_budget import SummaryBudgetService
+
+logger = logging.getLogger(__name__)
 
 
 def weekly_digest_window(reference: datetime | None = None, timezone_name: str = "America/New_York") -> tuple[datetime, datetime]:
@@ -32,11 +36,16 @@ def daily_digest_window(reference: datetime | None = None, timezone_name: str = 
 
 
 class DigestService:
-    def __init__(self, session: Session) -> None:
+    def __init__(
+        self,
+        session: Session,
+        email_sender: DigestEmailService | None = None,
+    ) -> None:
         self.session = session
         self.settings = get_settings()
         self.summarizer = OpenAISummarizer()
         self._owns_summarizer = True
+        self.email_sender = email_sender or DigestEmailService(self.settings)
 
     def close(self) -> None:
         if self._owns_summarizer:
@@ -74,6 +83,89 @@ class DigestService:
             news_limit=8,
         )
 
+    def send_daily_digest_email(
+        self,
+        *,
+        reference: datetime | None = None,
+        force: bool = False,
+    ) -> dict[str, int | bool | str | None]:
+        window_start, window_end = daily_digest_window(reference, self.settings.timezone)
+        existing = self.session.scalar(
+            select(Digest).where(
+                Digest.digest_type == "daily",
+                Digest.window_start == window_start,
+                Digest.window_end == window_end,
+            )
+        )
+        built = existing is None
+        digest = existing or self.build_daily_digest(reference=reference)
+        delivery_status = digest.email_delivery_status or "pending"
+
+        if delivery_status == "sent" and not force:
+            logger.info("Daily digest %s already emailed; skipping resend", digest.id)
+            return {
+                "digest_id": digest.id,
+                "title": digest.title,
+                "built": built,
+                "delivery_status": "already_sent",
+                "error": None,
+            }
+
+        if not self._has_email_content(digest):
+            digest.email_delivery_status = "skipped"
+            digest.email_last_attempted_at = datetime.now(ZoneInfo(self.settings.timezone))
+            digest.email_delivery_error = None
+            self.session.commit()
+            logger.info("Daily digest %s has no filing/news items; email skipped", digest.id)
+            return {
+                "digest_id": digest.id,
+                "title": digest.title,
+                "built": built,
+                "delivery_status": "skipped",
+                "error": None,
+            }
+
+        if not self.email_sender.is_enabled() or not self.email_sender.is_configured():
+            logger.info("Daily digest %s built but email delivery is disabled or not configured", digest.id)
+            return {
+                "digest_id": digest.id,
+                "title": digest.title,
+                "built": built,
+                "delivery_status": "disabled",
+                "error": None,
+            }
+
+        attempted_at = datetime.now(ZoneInfo(self.settings.timezone))
+        digest.email_last_attempted_at = attempted_at
+        digest.email_delivery_error = None
+        try:
+            self.email_sender.send_daily_digest(digest)
+        except Exception as exc:
+            digest.email_delivery_status = "failed"
+            digest.email_delivery_error = str(exc)
+            self.session.commit()
+            logger.error("Daily digest %s email delivery failed: %s", digest.id, exc)
+            return {
+                "digest_id": digest.id,
+                "title": digest.title,
+                "built": built,
+                "delivery_status": "failed",
+                "error": str(exc),
+            }
+
+        digest.email_delivery_status = "sent"
+        digest.email_delivered_at = attempted_at
+        digest.email_delivery_error = None
+        self.session.commit()
+        logger.info("Daily digest %s emailed to %s", digest.id, self.settings.digest_email_to)
+        return {
+            "digest_id": digest.id,
+            "title": digest.title,
+            "built": built,
+            "delivery_status": "sent",
+            "error": None,
+        }
+
     def list_digests(self, limit: int = 20) -> list[DigestResponse]:
         digests = self.session.scalars(select(Digest).order_by(Digest.window_start.desc()).limit(limit)).all()
         return [DigestResponse.model_validate(digest, from_attributes=True) for digest in digests]
@@ -103,6 +195,9 @@ class DigestService:
             )
         )
         if existing:
+            if existing.email_delivery_status is None:
+                existing.email_delivery_status = "pending" if digest_type == "daily" else "skipped"
+                self.session.commit()
             return existing
 
         candidate_filings = self.session.scalars(
@@ -158,6 +253,7 @@ class DigestService:
             window_start=window_start,
             window_end=window_end,
             narrative_summary=narrative_summary,
+            email_delivery_status="pending" if digest_type == "daily" else "skipped",
             payload={
                 "filings": [
                     {
@@ -174,6 +270,7 @@ class DigestService:
                         "id": item.id,
                         "title": item.title,
                         "source_name": item.source_name,
+                        "canonical_url": item.canonical_url,
                         "mentioned_companies": item.mentioned_companies or [],
                         "company_tag_ids": item.company_tag_ids or [],
                         "score": item.composite_score,
@@ -241,3 +338,8 @@ class DigestService:
             item.summary_status == "complete"
             or (item.summary_json or {}).get("summary")
         )
+
+    @staticmethod
+    def _has_email_content(digest: Digest) -> bool:
+        payload = digest.payload or {}
+        return bool((payload.get("filings") or []) or (payload.get("news") or []))

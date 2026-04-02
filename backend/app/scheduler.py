@@ -12,13 +12,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.config import get_settings
 from app.jobs import (
-    run_build_daily_digest,
     run_build_weekly_digest,
     run_ingest_news,
     run_poll_regulatory_events,
     run_poll_sec_filings,
     run_poll_trials,
     run_refresh_market_caps,
+    run_send_daily_digest_email,
     run_sync_universe,
 )
 
@@ -127,7 +127,7 @@ def build_scheduler(background: bool = False) -> BlockingScheduler | BackgroundS
         scheduler.add_job(
             _logged_job,
             CronTrigger(day_of_week="mon-fri", hour=getattr(settings, "daily_digest_hour", 7), minute=0),
-            kwargs={"name": "build_daily_digest", "fn": run_build_daily_digest},
+            kwargs={"name": "send_daily_digest_email", "fn": run_send_daily_digest_email},
             id="build_daily_digest",
             replace_existing=True,
         )

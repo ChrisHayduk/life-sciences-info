@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     enable_event_stream: bool = False
     enable_browser_pdf_rendering: bool = True
     browser_pdf_timeout_seconds: float = 45.0
+    digest_email_enabled: bool = False
+    digest_email_to: str = "chris.hayduk1@gmail.com"
+    digest_email_from: str = "chris.hayduk1@gmail.com"
+    smtp_host: str = "smtp.gmail.com"
+    smtp_port: int = 587
+    smtp_username: str = "chris.hayduk1@gmail.com"
+    smtp_password: str | None = None
+    smtp_use_starttls: bool = True
     daily_ai_budget_usd: float = 1.0
     ai_budget_news_share: float = 0.45
     ai_budget_filing_share: float = 0.25

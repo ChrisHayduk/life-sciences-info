@@ -298,3 +298,33 @@ def test_run_ensure_db_indexes_reports_created_indexes(monkeypatch):
     result = jobs.run_ensure_db_indexes()
 
     assert result == {"count": 2, "indexes": ["ix_one", "ix_two"]}
+
+
+def test_run_send_daily_digest_email_returns_delivery_state(db_session, monkeypatch):
+    class FakeDigestService:
+        def __init__(self, session):
+            self.session = session
+
+        def send_daily_digest_email(self, *, force=False):
+            assert force is True
+            return {
+                "digest_id": 12,
+                "title": "Daily Life Sciences Briefing: 2026-04-01",
+                "built": False,
+                "delivery_status": "already_sent",
+                "error": None,
+            }
+
+    monkeypatch.setattr("app.jobs.init_db", lambda: None)
+    monkeypatch.setattr("app.jobs.SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.jobs.DigestService", FakeDigestService)
+
+    result = jobs.run_send_daily_digest_email(force=True)
+
+    assert result == {
+        "digest_id": 12,
+        "title": "Daily Life Sciences Briefing: 2026-04-01",
+        "built": False,
+        "delivery_status": "already_sent",
+        "error": None,
+    }

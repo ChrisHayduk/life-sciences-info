@@ -39,6 +39,9 @@ def test_build_scheduler_can_include_daily_digest(monkeypatch):
     scheduler = scheduler_module.build_scheduler(background=True)
     job_ids = {job.id for job in scheduler.get_jobs()}
     assert "build_daily_digest" in job_ids
+    digest_job = next(job for job in scheduler.get_jobs() if job.id == "build_daily_digest")
+    assert digest_job.kwargs["name"] == "send_daily_digest_email"
+    assert digest_job.kwargs["fn"] is scheduler_module.run_send_daily_digest_email
 
 
 def test_build_scheduler_uses_non_overlapping_job_defaults(monkeypatch):

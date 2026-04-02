@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import logging
 
 from sqlalchemy import select
 
@@ -14,6 +15,8 @@ from app.services.market_caps import MarketCapService
 from app.services.news import NewsService
 from app.services.regulatory_events import RegulatoryEventService
 from app.services.universe import UniverseService
+
+logger = logging.getLogger(__name__)
 
 
 def _with_session(callback):
@@ -270,6 +273,27 @@ def run_build_daily_digest() -> int:
 
     digest = _with_session(_run)
     return digest.id
+
+
+def run_send_daily_digest_email(*, force: bool = False) -> dict[str, int | bool | str | None]:
+    def _run(session):
+        service = DigestService(session)
+        try:
+            return service.send_daily_digest_email(force=force)
+        finally:
+            _close_if_possible(service)
+
+    result = _with_session(_run)
+    if result["delivery_status"] == "failed":
+        logger.error("Daily digest email delivery failed for digest %s: %s", result["digest_id"], result["error"])
+    else:
+        logger.info(
+            "Daily digest email job completed for digest %s with status=%s built=%s",
+            result["digest_id"],
+            result["delivery_status"],
+            result["built"],
+        )
+    return result
 
 
 def run_ensure_db_indexes() -> dict[str, int | list[str]]:
@@ -557,6 +581,11 @@ def main() -> None:
     )
     subparsers.add_parser("build-weekly-digest", help="Build the current weekly digest.")
     subparsers.add_parser("build-daily-digest", help="Build the most recent daily digest.")
+    send_daily_digest_email_parser = subparsers.add_parser(
+        "send-daily-digest-email",
+        help="Build or reuse the most recent daily digest and email it if configured.",
+    )
+    send_daily_digest_email_parser.add_argument("--force", action="store_true")
 
     summarize_pending_parser = subparsers.add_parser(
         "summarize-pending",
@@ -732,6 +761,17 @@ def main() -> None:
     if args.command == "build-daily-digest":
         digest_id = run_build_daily_digest()
         print(f"Built daily digest {digest_id}", flush=True)
+        return
+    if args.command == "send-daily-digest-email":
+        result = run_send_daily_digest_email(force=args.force)
+        if result["delivery_status"] == "failed":
+            raise SystemExit(
+                f"Daily digest {result['digest_id']} email delivery failed: {result['error']}"
+            )
+        print(
+            f"Daily digest {result['digest_id']} status={result['delivery_status']} built={result['built']}",
+            flush=True,
+        )
         return
     if args.command == "reprocess-filing":
         item_id = run_reprocess_filing(args.item_id)

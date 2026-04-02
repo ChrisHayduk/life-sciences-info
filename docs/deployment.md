@@ -229,6 +229,22 @@ Recommended R2 default:
 - `ENABLE_BROWSER_PDF_RENDERING=true`
 - `BROWSER_PDF_TIMEOUT_SECONDS=45`
 
+#### Daily digest email delivery
+
+- `DIGEST_EMAIL_ENABLED=false`
+- `DIGEST_EMAIL_TO=chris.hayduk1@gmail.com`
+- `DIGEST_EMAIL_FROM=chris.hayduk1@gmail.com`
+- `SMTP_HOST=smtp.gmail.com`
+- `SMTP_PORT=587`
+- `SMTP_USERNAME=chris.hayduk1@gmail.com`
+- `SMTP_PASSWORD`
+- `SMTP_USE_STARTTLS=true`
+
+Production note:
+
+- The daily digest still builds when email delivery is disabled or incomplete.
+- Once SMTP is configured and `DIGEST_EMAIL_ENABLED=true`, the weekday daily digest job builds or reuses the digest and emails it to `DIGEST_EMAIL_TO`.
+
 #### AI budget and prioritization
 
 - `DAILY_AI_BUDGET_USD=1.00`
@@ -369,7 +385,7 @@ When `ENABLE_SCHEDULER=true`, the Render API service automatically runs:
 - `poll-trials` every 7 days
 - `sync-universe` every 7 days
 - `refresh-market-caps` every 7 days
-- `build-daily-digest` on weekdays at `DAILY_DIGEST_HOUR` when `ENABLE_DAILY_DIGEST=true`
+- `send-daily-digest-email` on weekdays at `DAILY_DIGEST_HOUR` when `ENABLE_DAILY_DIGEST=true`
 - `build-weekly-digest` on the configured weekday/time
 
 Two important notes:
@@ -488,6 +504,8 @@ This is the manual escape hatch when you want to spend a little AI budget on the
 
 ```bash
 python -m app.jobs build-daily-digest
+python -m app.jobs send-daily-digest-email
+python -m app.jobs send-daily-digest-email --force
 python -m app.jobs build-weekly-digest
 ```
 

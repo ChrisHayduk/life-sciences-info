@@ -110,6 +110,24 @@ def test_admin_ensure_db_indexes_route(client, monkeypatch):
     assert "ix_one, ix_two" in response.json()["message"]
 
 
+def test_admin_send_daily_digest_email_route(client, monkeypatch):
+    monkeypatch.setattr(
+        "app.api.routes.run_send_daily_digest_email",
+        lambda force=False: {
+            "digest_id": 7,
+            "title": "Daily Life Sciences Briefing: 2026-04-01",
+            "built": True,
+            "delivery_status": "sent",
+            "error": None,
+        },
+    )
+
+    response = client.post("/api/v1/admin/send-daily-digest-email?force=true")
+
+    assert response.status_code == 200
+    assert "Daily digest 7 sent." in response.json()["message"]
+
+
 def test_events_stream_returns_cors_headers_for_frontend_origin(monkeypatch):
     monkeypatch.setenv("FRONTEND_BASE_URL", "https://life-sciences-info.vercel.app")
     monkeypatch.setenv("CORS_ORIGINS", "")

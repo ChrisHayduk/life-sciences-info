@@ -39,6 +39,20 @@ services:
         value: "true"
       - key: ENABLE_BROWSER_PDF_RENDERING
         value: "true"
+      - key: DIGEST_EMAIL_ENABLED
+        value: "false"
+      - key: DIGEST_EMAIL_TO
+        value: chris.hayduk1@gmail.com
+      - key: DIGEST_EMAIL_FROM
+        value: chris.hayduk1@gmail.com
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        value: chris.hayduk1@gmail.com
+      - key: SMTP_USE_STARTTLS
+        value: "true"
       - key: DAILY_AI_BUDGET_USD
         value: "1.00"
       - key: AI_BUDGET_NEWS_SHARE
@@ -122,6 +136,8 @@ services:
       - key: CORS_ORIGINS
         sync: false
       - key: ADMIN_API_TOKEN
+        sync: false
+      - key: SMTP_PASSWORD
         sync: false
 
 databases:

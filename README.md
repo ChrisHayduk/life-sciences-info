@@ -278,6 +278,7 @@ python -m app.jobs poll-regulatory-events
 python -m app.jobs poll-trials
 python -m app.jobs poll-trials --focus-tickers MRK,PFE
 python -m app.jobs build-daily-digest
+python -m app.jobs send-daily-digest-email
 python -m app.jobs build-weekly-digest
 ```
 
@@ -316,6 +317,7 @@ Scheduled jobs:
 - universe sync every 7 days
 - market-cap refresh every 7 days
 - weekly digest build on the configured weekday/time
+- weekday daily digest build plus optional email delivery at `DAILY_DIGEST_HOUR` when `ENABLE_DAILY_DIGEST=true`
 
 Important operational note:
 
@@ -339,6 +341,7 @@ Important operational note:
 - `FRONTEND_BASE_URL`
 - `API_BASE_URL`
 - `CORS_ORIGINS`
+- `SMTP_PASSWORD` when `DIGEST_EMAIL_ENABLED=true`
 
 ### Recommended backend env vars
 
@@ -356,6 +359,13 @@ Important operational note:
 - `AACT_DB_HOST=aact-db.ctti-clinicaltrials.org`
 - `AACT_DB_PORT=5432`
 - `AACT_DB_NAME=aact`
+- `DIGEST_EMAIL_ENABLED=false` until SMTP is configured
+- `DIGEST_EMAIL_TO=chris.hayduk1@gmail.com`
+- `DIGEST_EMAIL_FROM=chris.hayduk1@gmail.com`
+- `SMTP_HOST=smtp.gmail.com`
+- `SMTP_PORT=587`
+- `SMTP_USERNAME=chris.hayduk1@gmail.com`
+- `SMTP_USE_STARTTLS=true`
 
 ### Cost-control env vars
 
@@ -401,6 +411,14 @@ Important operational note:
 - `DIGEST_MINUTE`
 - `ENABLE_DAILY_DIGEST`
 - `DAILY_DIGEST_HOUR`
+- `DIGEST_EMAIL_ENABLED`
+- `DIGEST_EMAIL_TO`
+- `DIGEST_EMAIL_FROM`
+- `SMTP_HOST`
+- `SMTP_PORT`
+- `SMTP_USERNAME`
+- `SMTP_PASSWORD`
+- `SMTP_USE_STARTTLS`
 - `SEC_RATE_LIMIT_DELAY_SECONDS`
 - `SOURCE_FETCH_TIMEOUT_SECONDS`
 - `SUMMARY_PROMPT_VERSION`
@@ -442,6 +460,7 @@ Useful admin endpoints include:
 - `/api/v1/admin/retag-news-companies`
 - `/api/v1/admin/summarize-pending/{kind}`
 - `/api/v1/admin/build-daily-digest`
+- `/api/v1/admin/send-daily-digest-email`
 - `/api/v1/admin/build-weekly-digest`
 - `/api/v1/admin/poll-trials`
 - `/api/v1/admin/usage-stats`

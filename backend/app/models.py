@@ -156,6 +156,10 @@ class Digest(Base, TimestampMixin):
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     narrative_summary: Mapped[str] = mapped_column(Text)
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    email_delivery_status: Mapped[str] = mapped_column(String(32), default="pending")
+    email_last_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_delivery_error: Mapped[str | None] = mapped_column(Text)
 
 
 class ClinicalTrial(Base, TimestampMixin):

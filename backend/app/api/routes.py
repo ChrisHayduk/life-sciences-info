@@ -21,6 +21,7 @@ from app.jobs import (
     run_refresh_market_caps,
     run_resummarize_item,
     run_retag_news_companies,
+    run_send_daily_digest_email,
     run_summarize_pending,
 )
 from app.models import ClinicalTrial, Company, Digest, Filing, NewsItem, RegulatoryEvent, SummaryUsage, Watchlist
@@ -599,6 +600,23 @@ def admin_build_digest(session: Session = Depends(get_session)) -> AdminActionRe
 def admin_build_daily_digest() -> AdminActionResponse:
     digest_id = run_build_daily_digest()
     return AdminActionResponse(status="ok", message=f"Built daily digest {digest_id}.")
+
+
+@router.post("/admin/send-daily-digest-email", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
+def admin_send_daily_digest_email(force: bool = False) -> AdminActionResponse:
+    result = run_send_daily_digest_email(force=force)
+    if result["delivery_status"] == "failed":
+        raise HTTPException(
+            status_code=502,
+            detail=f"Daily digest {result['digest_id']} email delivery failed: {result['error']}",
+        )
+    return AdminActionResponse(
+        status="ok",
+        message=(
+            f"Daily digest {result['digest_id']} {result['delivery_status']}."
+            f" built={result['built']}"
+        ),
+    )
 
 
 @router.post("/admin/re-summarize/{kind}/{item_id}", response_model=AdminActionResponse, dependencies=[Depends(require_admin_token)])
